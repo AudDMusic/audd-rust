@@ -1,0 +1,1242 @@
+//! Typed models with `#[serde(flatten)] extras` on every type so unknown server
+//! fields round-trip without an SDK release.
+
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use url::Url;
+
+/// Streaming providers reachable via the `lis.tn` redirect helper.
+///
+/// Use with [`RecognitionResult::streaming_url`] /
+/// [`RecognitionResult::streaming_urls`] / [`EnterpriseMatch::streaming_url`]
+/// /  [`EnterpriseMatch::streaming_urls`] to produce a direct or redirect URL
+/// pointing the listener at the provider's page for the matched track.
+///
+/// Serializes to its wire-name (`"spotify"`, `"apple_music"`, …) for
+/// round-trip into logs / queues. Deserializes from the same wire-names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum StreamingProvider {
+    /// Spotify.
+    #[serde(rename = "spotify")]
+    Spotify,
+    /// Apple Music.
+    #[serde(rename = "apple_music")]
+    AppleMusic,
+    /// Deezer.
+    #[serde(rename = "deezer")]
+    Deezer,
+    /// Napster.
+    #[serde(rename = "napster")]
+    Napster,
+    /// YouTube. Only the `lis.tn` redirect path applies — there is no YouTube
+    /// metadata block to pull a direct URL from.
+    #[serde(rename = "youtube")]
+    YouTube,
+}
+
+impl StreamingProvider {
+    /// Wire-name for the provider, matching the `lis.tn?<provider>` query
+    /// parameter and the `return=` field on [`crate::AudD::recognize`].
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spotify => "spotify",
+            Self::AppleMusic => "apple_music",
+            Self::Deezer => "deezer",
+            Self::Napster => "napster",
+            Self::YouTube => "youtube",
+        }
+    }
+}
+
+impl std::fmt::Display for StreamingProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Iteration order for [`RecognitionResult::streaming_urls`] /
+/// [`EnterpriseMatch::streaming_urls`]. Matches the audd-go and audd-python
+/// reference order.
+const ALL_STREAMING_PROVIDERS: [StreamingProvider; 5] = [
+    StreamingProvider::Spotify,
+    StreamingProvider::AppleMusic,
+    StreamingProvider::Deezer,
+    StreamingProvider::Napster,
+    StreamingProvider::YouTube,
+];
+
+/// Build `"<song_link>?<provider>"` only when `song_link.host_str() == "lis.tn"`.
+///
+/// Returns `None` for non-`lis.tn` hosts (e.g. YouTube song-links) and when
+/// `song_link` is absent. `lis.tn` 302-redirects each provider query to the
+/// matched track's page on that provider.
+fn lis_tn_streaming_url(song_link: Option<&str>, provider: &str) -> Option<String> {
+    let link = song_link?;
+    let parsed = Url::parse(link).ok()?;
+    if parsed.host_str() != Some("lis.tn") {
+        return None;
+    }
+    let sep = if parsed.query().is_some() { '&' } else { '?' };
+    Some(format!("{link}{sep}{provider}"))
+}
+
+/// Apple Music metadata returned by the `apple_music` block.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct AppleMusicMetadata {
+    /// Track title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Artist name as Apple labels it.
+    #[serde(
+        default,
+        rename = "artistName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub artist_name: Option<String>,
+    /// Album name as Apple labels it.
+    #[serde(default, rename = "albumName", skip_serializing_if = "Option::is_none")]
+    pub album_name: Option<String>,
+    /// Apple Music URL for the track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Track length in milliseconds.
+    #[serde(
+        default,
+        rename = "durationInMillis",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub duration_in_millis: Option<i64>,
+    /// International Standard Recording Code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isrc: Option<String>,
+    /// Track number on the disc.
+    #[serde(
+        default,
+        rename = "trackNumber",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub track_number: Option<i32>,
+    /// Composer credits.
+    #[serde(
+        default,
+        rename = "composerName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub composer_name: Option<String>,
+    /// Disc number on a multi-disc release.
+    #[serde(
+        default,
+        rename = "discNumber",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disc_number: Option<i32>,
+    /// Apple's release date for the track.
+    #[serde(
+        default,
+        rename = "releaseDate",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub release_date: Option<String>,
+    /// Forward-compat: any unknown fields the server returned.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+/// Spotify metadata returned by the `spotify` block.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct SpotifyMetadata {
+    /// Spotify track ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Track name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Track length in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    /// Whether the track is flagged explicit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicit: Option<bool>,
+    /// Spotify popularity score (0–100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub popularity: Option<i32>,
+    /// Track number on the disc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_number: Option<i32>,
+    /// Spotify object type (typically `track`).
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub object_type: Option<String>,
+    /// Spotify URI (e.g., `spotify:track:...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    /// Forward-compat: any unknown fields.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+/// Deezer metadata returned by the `deezer` block.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct DeezerMetadata {
+    /// Deezer track ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    /// Track title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Track length in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<i64>,
+    /// Web link to the track on Deezer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    /// Forward-compat.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+/// Napster metadata returned by the `napster` block.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct NapsterMetadata {
+    /// Napster track ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Track name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// ISRC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isrc: Option<String>,
+    /// Artist name.
+    #[serde(
+        default,
+        rename = "artistName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub artist_name: Option<String>,
+    /// Album name.
+    #[serde(default, rename = "albumName", skip_serializing_if = "Option::is_none")]
+    pub album_name: Option<String>,
+    /// Forward-compat.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+/// MusicBrainz match entry.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct MusicBrainzEntry {
+    /// MusicBrainz recording ID.
+    #[serde(default)]
+    pub id: String,
+    /// Match score, often a number but sometimes serialized as a string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<Value>,
+    /// Recording title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Recording length in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<i64>,
+    /// Forward-compat: any unknown fields.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+/// A recognition result.
+///
+/// `timecode` is always present on a match. All other typed fields are optional.
+/// Public-catalog matches set `artist`/`title`/etc.; custom-catalog matches set
+/// `audio_id` only. Use [`Self::is_custom_match`] / [`Self::is_public_match`]
+/// to discriminate, or [`RecognitionMatch::from`] for a sealed sum view.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct RecognitionResult {
+    /// Position in the source where the match starts (e.g., `"00:56"`).
+    pub timecode: String,
+    /// Set on custom-catalog matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_id: Option<i64>,
+    /// Artist name on a public-catalog match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    /// Track title on a public-catalog match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Album name on a public-catalog match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    /// Track release date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    /// Record label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// AudD-hosted song-link URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub song_link: Option<String>,
+    /// Apple Music metadata if requested via `return=apple_music`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_music: Option<AppleMusicMetadata>,
+    /// Spotify metadata if requested via `return=spotify`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spotify: Option<SpotifyMetadata>,
+    /// Deezer metadata if requested via `return=deezer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deezer: Option<DeezerMetadata>,
+    /// Napster metadata if requested via `return=napster`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub napster: Option<NapsterMetadata>,
+    /// MusicBrainz matches if requested via `return=musicbrainz`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub musicbrainz: Option<Vec<MusicBrainzEntry>>,
+    /// Forward-compat: any unknown fields the server returned.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+impl RecognitionResult {
+    /// `true` when `audio_id` is set (custom-catalog match).
+    #[must_use]
+    pub fn is_custom_match(&self) -> bool {
+        self.audio_id.is_some()
+    }
+
+    /// `true` when `artist` or `title` is set (public-catalog match).
+    #[must_use]
+    pub fn is_public_match(&self) -> bool {
+        self.audio_id.is_none() && (self.artist.is_some() || self.title.is_some())
+    }
+
+    /// Cover-art URL for `lis.tn`-hosted song-links, else `None`.
+    ///
+    /// AudD's `?thumb` image endpoint exists only on `lis.tn` song-links;
+    /// YouTube and other hosts return `None`.
+    #[must_use]
+    pub fn thumbnail_url(&self) -> Option<String> {
+        lis_tn_streaming_url(self.song_link.as_deref(), "thumb")
+    }
+
+    /// Direct or redirect URL for a streaming provider, with smart fallback.
+    ///
+    /// Resolution order:
+    ///
+    /// 1. **Direct URL from the metadata block** when the user requested that
+    ///    provider via `return=` (e.g. `apple_music.url`,
+    ///    `spotify.external_urls.spotify` / `spotify.uri`, `deezer.link`,
+    ///    `napster.href`). Direct = no redirect, faster for clients.
+    /// 2. **`lis.tn` redirect** `<song_link>?<provider>` when `song_link` is a
+    ///    `lis.tn` URL. Works regardless of whether `return=` was set.
+    /// 3. `None` when neither path resolves (e.g. YouTube `song_link` and the
+    ///    user didn't request the provider's metadata block).
+    ///
+    /// [`StreamingProvider::YouTube`] only resolves through the `lis.tn`
+    /// redirect path — there's no YouTube metadata block.
+    #[must_use]
+    pub fn streaming_url(&self, provider: StreamingProvider) -> Option<String> {
+        if let Some(direct) = self.direct_streaming_url(provider) {
+            return Some(direct);
+        }
+        lis_tn_streaming_url(self.song_link.as_deref(), provider.as_str())
+    }
+
+    /// Pull a direct URL out of the corresponding metadata block, if present.
+    /// Reads from `extras` (forward-compat) when the typed field is absent or
+    /// empty — covers e.g. `spotify.external_urls.spotify`, which we don't
+    /// type because the server's shape varies.
+    fn direct_streaming_url(&self, provider: StreamingProvider) -> Option<String> {
+        match provider {
+            StreamingProvider::AppleMusic => self
+                .apple_music
+                .as_ref()
+                .and_then(|am| non_empty(am.url.as_deref())),
+            StreamingProvider::Spotify => {
+                if let Some(sp) = self.spotify.as_ref() {
+                    if let Some(u) = sp
+                        .extras
+                        .get("external_urls")
+                        .and_then(|v| v.get("spotify"))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        return Some(u.to_string());
+                    }
+                    if let Some(u) = non_empty(sp.uri.as_deref()) {
+                        return Some(u);
+                    }
+                }
+                None
+            }
+            StreamingProvider::Deezer => self
+                .deezer
+                .as_ref()
+                .and_then(|d| non_empty(d.link.as_deref())),
+            StreamingProvider::Napster => self.napster.as_ref().and_then(|n| {
+                n.extras
+                    .get("href")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            }),
+            // YouTube: no metadata block; lis.tn redirect is the only path.
+            StreamingProvider::YouTube => None,
+        }
+    }
+
+    /// Map of every provider with a resolvable URL — direct or via `lis.tn`
+    /// redirect. Empty when neither path resolves for any provider.
+    ///
+    /// Iteration order matches the audd-go / audd-python reference:
+    /// Spotify, Apple Music, Deezer, Napster, YouTube.
+    #[must_use]
+    pub fn streaming_urls(&self) -> HashMap<StreamingProvider, String> {
+        let mut out = HashMap::new();
+        for p in ALL_STREAMING_PROVIDERS {
+            if let Some(u) = self.streaming_url(p) {
+                out.insert(p, u);
+            }
+        }
+        out
+    }
+
+    /// First available 30-second audio preview URL, in priority order.
+    ///
+    /// Picks the first non-empty URL from `apple_music.previews[0].url`, then
+    /// `spotify.preview_url`, then `deezer.preview`. Returns `None` if no
+    /// metadata block carries a preview.
+    ///
+    /// **Note:** previews are governed by their respective providers' terms
+    /// of use (Apple Music, Spotify, Deezer). The SDK consumer is responsible
+    /// for honoring those terms — including caching restrictions, attribution
+    /// requirements, and any redistribution constraints.
+    #[must_use]
+    pub fn preview_url(&self) -> Option<String> {
+        // Apple Music: previews is a list of {"url": "..."} entries — kept in
+        // extras since AudD's `apple_music` block ships it without our typing.
+        if let Some(am) = self.apple_music.as_ref() {
+            if let Some(u) = am
+                .extras
+                .get("previews")
+                .and_then(Value::as_array)
+                .and_then(|arr| arr.first())
+                .and_then(|first| first.get("url"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(u.to_string());
+            }
+        }
+        // Spotify: preview_url field directly (in extras since untyped).
+        if let Some(sp) = self.spotify.as_ref() {
+            if let Some(u) = sp
+                .extras
+                .get("preview_url")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(u.to_string());
+            }
+        }
+        // Deezer: preview field directly (in extras since untyped).
+        if let Some(dz) = self.deezer.as_ref() {
+            if let Some(u) = dz
+                .extras
+                .get("preview")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(u.to_string());
+            }
+        }
+        None
+    }
+}
+
+fn non_empty(s: Option<&str>) -> Option<String> {
+    s.filter(|v| !v.is_empty()).map(String::from)
+}
+
+/// Sealed-style view over [`RecognitionResult`] for callers who want
+/// exhaustive `match`.
+///
+/// Serializes as a serde-tagged enum (`{"kind": "public", "result": …}` /
+/// `{"kind": "custom", "result": …}`) so callers can write the discriminator
+/// straight to a log/queue and pattern-match on it later.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "result", rename_all = "snake_case")]
+pub enum RecognitionMatch {
+    /// AudD public-catalog match. Carries the canonical struct.
+    Public(RecognitionResult),
+    /// Custom-catalog match. Carries the canonical struct.
+    Custom(RecognitionResult),
+}
+
+impl From<RecognitionResult> for RecognitionMatch {
+    fn from(r: RecognitionResult) -> Self {
+        if r.is_custom_match() {
+            Self::Custom(r)
+        } else {
+            Self::Public(r)
+        }
+    }
+}
+
+impl RecognitionMatch {
+    /// Borrow the underlying [`RecognitionResult`].
+    #[must_use]
+    pub fn result(&self) -> &RecognitionResult {
+        match self {
+            Self::Public(r) | Self::Custom(r) => r,
+        }
+    }
+
+    /// Consume the wrapper, returning the underlying [`RecognitionResult`].
+    #[must_use]
+    pub fn into_result(self) -> RecognitionResult {
+        match self {
+            Self::Public(r) | Self::Custom(r) => r,
+        }
+    }
+}
+
+/// One match in an enterprise-recognition response.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct EnterpriseMatch {
+    /// Match score (0–100).
+    #[serde(default)]
+    pub score: i32,
+    /// Position in the source where the match starts.
+    pub timecode: String,
+    /// Artist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    /// Title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Album.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    /// Release date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    /// Label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// ISRC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isrc: Option<String>,
+    /// UPC of the album.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upc: Option<String>,
+    /// AudD-hosted song-link URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub song_link: Option<String>,
+    /// Start offset of the match in the source (in seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_offset: Option<i64>,
+    /// End offset of the match in the source (in seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_offset: Option<i64>,
+    /// Forward-compat.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+impl EnterpriseMatch {
+    /// Cover-art URL for `lis.tn`-hosted song-links, else `None`.
+    #[must_use]
+    pub fn thumbnail_url(&self) -> Option<String> {
+        lis_tn_streaming_url(self.song_link.as_deref(), "thumb")
+    }
+
+    /// `lis.tn`-redirect URL for a streaming provider, or `None` when
+    /// `song_link` isn't a `lis.tn` URL. `EnterpriseMatch` doesn't carry the
+    /// per-provider metadata blocks, so only the redirect path applies.
+    /// Mirrors the behaviour of [`RecognitionResult::streaming_url`] minus
+    /// the direct-URL fallback.
+    #[must_use]
+    pub fn streaming_url(&self, provider: StreamingProvider) -> Option<String> {
+        lis_tn_streaming_url(self.song_link.as_deref(), provider.as_str())
+    }
+
+    /// All providers' redirect URLs — see [`Self::streaming_url`]. Empty when
+    /// `song_link` isn't a `lis.tn` URL.
+    #[must_use]
+    pub fn streaming_urls(&self) -> HashMap<StreamingProvider, String> {
+        let mut out = HashMap::new();
+        for p in ALL_STREAMING_PROVIDERS {
+            if let Some(u) = self.streaming_url(p) {
+                out.insert(p, u);
+            }
+        }
+        out
+    }
+}
+
+/// One chunk from `recognize_enterprise` (enterprise responses come in chunks).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct EnterpriseChunkResult {
+    /// Songs matched in this chunk.
+    #[serde(default)]
+    pub songs: Vec<EnterpriseMatch>,
+    /// Offset of this chunk in the source (e.g., `"00:00"`).
+    #[serde(default)]
+    pub offset: String,
+    /// Forward-compat.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+/// One row in the streams list.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct Stream {
+    /// Caller-chosen integer ID for the stream.
+    pub radio_id: i64,
+    /// Source URL the stream is reading from.
+    pub url: String,
+    /// Whether AudD is currently consuming and recognizing the stream.
+    #[serde(default)]
+    pub stream_running: bool,
+    /// Server-generated longpoll category for sharing with browser/widget consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub longpoll_category: Option<String>,
+    /// Forward-compat.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+/// One result entry inside a stream-callback's `result.results` array.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct StreamCallbackResultEntry {
+    /// Artist.
+    pub artist: String,
+    /// Title.
+    pub title: String,
+    /// Match score.
+    pub score: i32,
+    /// Album.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    /// Release date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    /// Record label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// AudD-hosted song-link URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub song_link: Option<String>,
+    /// Apple Music metadata if requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_music: Option<AppleMusicMetadata>,
+    /// Spotify metadata if requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spotify: Option<SpotifyMetadata>,
+    /// Deezer metadata if requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deezer: Option<DeezerMetadata>,
+    /// Napster metadata if requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub napster: Option<NapsterMetadata>,
+    /// MusicBrainz matches if requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub musicbrainz: Option<Vec<MusicBrainzEntry>>,
+    /// Forward-compat.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+/// `result` payload of a stream-recognition callback.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct StreamCallbackResult {
+    /// Stream the callback is for.
+    pub radio_id: i64,
+    /// Wall-clock timestamp the recognition fired at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    /// Length of the recognized segment, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_length: Option<i64>,
+    /// Per-track results.
+    #[serde(default)]
+    pub results: Vec<StreamCallbackResultEntry>,
+    /// Forward-compat.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+/// `notification` payload of a stream-management callback.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct StreamCallbackNotification {
+    /// Stream the notification is for.
+    pub radio_id: i64,
+    /// Whether the stream is currently running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_running: Option<bool>,
+    /// Numeric notification code.
+    pub notification_code: i32,
+    /// Human-readable notification text.
+    pub notification_message: String,
+    /// Forward-compat.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+/// Wrapper over a stream-callback POST body. Either a recognition result or a
+/// notification — discriminated. Mirrors the audd-python `StreamCallbackPayload`.
+///
+/// Round-trippable via `serde`: the typed fields serialize as
+/// `{"result": ..., "notification": ..., "time": ..., "raw_payload": ...}`.
+/// To re-parse a server callback body, prefer [`Self::parse`] — it preserves
+/// the original JSON in `raw_payload` and applies the discriminator logic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StreamCallbackPayload {
+    /// Recognition payload, if this callback was a recognition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<StreamCallbackResult>,
+    /// Notification payload, if this callback was a notification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<StreamCallbackNotification>,
+    /// Server-emitted timestamp on notification callbacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<i64>,
+    /// Original parsed JSON body.
+    #[serde(default)]
+    pub raw_payload: Value,
+}
+
+impl StreamCallbackPayload {
+    /// `true` if this is a recognition-result callback.
+    #[must_use]
+    pub fn is_result(&self) -> bool {
+        self.result.is_some()
+    }
+
+    /// `true` if this is a notification callback.
+    #[must_use]
+    pub fn is_notification(&self) -> bool {
+        self.notification.is_some()
+    }
+
+    /// Parse the JSON body that AudD POSTs to your callback URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns `serde_json::Error` if the inner `result` / `notification`
+    /// objects don't deserialize into the typed shapes.
+    pub fn parse(body: Value) -> Result<Self, serde_json::Error> {
+        let raw_payload = body.clone();
+        if let Some(notif) = body.get("notification").cloned() {
+            let notification: StreamCallbackNotification = serde_json::from_value(notif)?;
+            let time = body.get("time").and_then(Value::as_i64);
+            return Ok(Self {
+                result: None,
+                notification: Some(notification),
+                time,
+                raw_payload,
+            });
+        }
+        let result_value = body.get("result").cloned().unwrap_or(Value::Null);
+        let result: StreamCallbackResult = serde_json::from_value(result_value)?;
+        Ok(Self {
+            result: Some(result),
+            notification: None,
+            time: None,
+            raw_payload,
+        })
+    }
+}
+
+/// One result from `findLyrics`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct LyricsResult {
+    /// Artist name.
+    pub artist: String,
+    /// Song title.
+    pub title: String,
+    /// Lyrics text, if AudD has them indexed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lyrics: Option<String>,
+    /// Internal song identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub song_id: Option<i64>,
+    /// Embed/media URL when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<String>,
+    /// Server-rendered "Artist – Title" string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_title: Option<String>,
+    /// Internal artist identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_id: Option<i64>,
+    /// AudD-hosted song-link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub song_link: Option<String>,
+    /// Forward-compat.
+    #[serde(flatten)]
+    pub extras: HashMap<String, Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn recognition_basic() {
+        let v = json!({
+            "artist": "Tears For Fears",
+            "title": "Everybody Wants To Rule The World",
+            "timecode": "00:56",
+            "song_link": "https://lis.tn/NbkVb"
+        });
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        assert!(r.is_public_match());
+        assert!(!r.is_custom_match());
+        assert_eq!(
+            r.thumbnail_url().as_deref(),
+            Some("https://lis.tn/NbkVb?thumb")
+        );
+    }
+
+    #[test]
+    fn custom_match() {
+        let v = json!({"timecode": "01:45", "audio_id": 146});
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        assert!(r.is_custom_match());
+        assert!(!r.is_public_match());
+        assert_eq!(r.thumbnail_url(), None);
+    }
+
+    #[test]
+    fn match_enum() {
+        let r = RecognitionResult {
+            timecode: "x".into(),
+            audio_id: Some(1),
+            ..Default::default()
+        };
+        match RecognitionMatch::from(r) {
+            RecognitionMatch::Custom(_) => {}
+            RecognitionMatch::Public(_) => panic!("expected Custom"),
+        }
+    }
+
+    #[test]
+    fn extras_round_trip() {
+        let v = json!({
+            "timecode": "00:01",
+            "artist": "X",
+            "tidal": {"id": "abc"}
+        });
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.extras.get("tidal").unwrap().get("id").unwrap(), "abc");
+    }
+
+    #[test]
+    fn youtube_link_no_thumb() {
+        let r = RecognitionResult {
+            timecode: "00:01".into(),
+            song_link: Some("https://www.youtube.com/watch?v=abc".into()),
+            ..Default::default()
+        };
+        assert_eq!(r.thumbnail_url(), None);
+    }
+
+    #[test]
+    fn thumb_with_existing_query() {
+        let r = RecognitionResult {
+            timecode: "00:01".into(),
+            song_link: Some("https://lis.tn/abc?utm=x".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            r.thumbnail_url().as_deref(),
+            Some("https://lis.tn/abc?utm=x&thumb")
+        );
+    }
+
+    #[test]
+    fn callback_result_parse() {
+        let body = json!({
+            "status": "success",
+            "result": {
+                "radio_id": 7,
+                "timestamp": "2020-04-13 10:31:43",
+                "play_length": 111,
+                "results": [
+                    {"artist": "X", "title": "Y", "score": 100}
+                ]
+            }
+        });
+        let p = StreamCallbackPayload::parse(body).unwrap();
+        assert!(p.is_result());
+        assert_eq!(p.result.as_ref().unwrap().radio_id, 7);
+    }
+
+    #[test]
+    fn callback_notification_parse() {
+        let body = json!({
+            "status": "-",
+            "notification": {
+                "radio_id": 3,
+                "stream_running": false,
+                "notification_code": 650,
+                "notification_message": "x"
+            },
+            "time": 1
+        });
+        let p = StreamCallbackPayload::parse(body).unwrap();
+        assert!(p.is_notification());
+        assert_eq!(p.notification.as_ref().unwrap().notification_code, 650);
+        assert_eq!(p.time, Some(1));
+    }
+
+    #[test]
+    fn enterprise_match_thumb() {
+        let m = EnterpriseMatch {
+            score: 80,
+            timecode: "00:01".into(),
+            song_link: Some("https://lis.tn/abc".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            m.thumbnail_url().as_deref(),
+            Some("https://lis.tn/abc?thumb")
+        );
+    }
+
+    // ----- StreamingProvider / streaming_url / preview_url -----
+
+    #[test]
+    fn streaming_url_prefers_direct_apple_music() {
+        let v = json!({
+            "timecode": "00:01",
+            "song_link": "https://lis.tn/abc",
+            "apple_music": {"url": "https://music.apple.com/track/123"}
+        });
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            r.streaming_url(StreamingProvider::AppleMusic).as_deref(),
+            Some("https://music.apple.com/track/123"),
+        );
+    }
+
+    #[test]
+    fn streaming_url_falls_back_to_lis_tn_redirect() {
+        let v = json!({
+            "timecode": "00:01",
+            "song_link": "https://lis.tn/abc"
+        });
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        // No metadata blocks → fall back to lis.tn redirect.
+        assert_eq!(
+            r.streaming_url(StreamingProvider::Spotify).as_deref(),
+            Some("https://lis.tn/abc?spotify"),
+        );
+        assert_eq!(
+            r.streaming_url(StreamingProvider::YouTube).as_deref(),
+            Some("https://lis.tn/abc?youtube"),
+        );
+    }
+
+    #[test]
+    fn streaming_url_returns_none_for_youtube_song_link() {
+        // YouTube song-link host → no lis.tn fallback, no metadata block ever.
+        let v = json!({
+            "timecode": "00:01",
+            "song_link": "https://www.youtube.com/watch?v=abc"
+        });
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.streaming_url(StreamingProvider::Spotify), None);
+        assert_eq!(r.streaming_url(StreamingProvider::YouTube), None);
+    }
+
+    #[test]
+    fn streaming_urls_lists_all_resolvable() {
+        let v = json!({
+            "timecode": "00:01",
+            "song_link": "https://lis.tn/abc",
+            "deezer": {"link": "https://deezer.com/track/9"}
+        });
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        let urls = r.streaming_urls();
+        // Deezer is direct, others use lis.tn redirect.
+        assert_eq!(
+            urls.get(&StreamingProvider::Deezer).map(String::as_str),
+            Some("https://deezer.com/track/9"),
+        );
+        assert_eq!(
+            urls.get(&StreamingProvider::Spotify).map(String::as_str),
+            Some("https://lis.tn/abc?spotify"),
+        );
+        assert_eq!(urls.len(), 5);
+    }
+
+    #[test]
+    fn streaming_url_spotify_external_urls_in_extras() {
+        // Spotify ships external_urls.spotify in the metadata block; we read
+        // it through the forward-compat extras map.
+        let v = json!({
+            "timecode": "00:01",
+            "spotify": {
+                "id": "abc",
+                "external_urls": {"spotify": "https://open.spotify.com/track/abc"}
+            }
+        });
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            r.streaming_url(StreamingProvider::Spotify).as_deref(),
+            Some("https://open.spotify.com/track/abc"),
+        );
+    }
+
+    #[test]
+    fn preview_url_apple_music_first() {
+        let v = json!({
+            "timecode": "00:01",
+            "apple_music": {
+                "previews": [{"url": "https://itunes/preview.m4a"}]
+            },
+            "spotify": {"preview_url": "https://spotify/preview.mp3"}
+        });
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            r.preview_url().as_deref(),
+            Some("https://itunes/preview.m4a")
+        );
+    }
+
+    #[test]
+    fn preview_url_falls_through_to_deezer() {
+        let v = json!({
+            "timecode": "00:01",
+            "deezer": {"preview": "https://deezer/preview.mp3"}
+        });
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            r.preview_url().as_deref(),
+            Some("https://deezer/preview.mp3")
+        );
+    }
+
+    #[test]
+    fn preview_url_none_when_absent() {
+        let v = json!({"timecode": "00:01"});
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.preview_url(), None);
+    }
+
+    #[test]
+    fn enterprise_match_streaming_urls_lis_tn_only() {
+        let m = EnterpriseMatch {
+            score: 90,
+            timecode: "00:01".into(),
+            song_link: Some("https://lis.tn/abc".into()),
+            ..Default::default()
+        };
+        let urls = m.streaming_urls();
+        assert_eq!(urls.len(), 5);
+        assert_eq!(
+            urls.get(&StreamingProvider::Spotify).map(String::as_str),
+            Some("https://lis.tn/abc?spotify"),
+        );
+    }
+
+    #[test]
+    fn enterprise_match_streaming_urls_empty_for_youtube() {
+        let m = EnterpriseMatch {
+            score: 90,
+            timecode: "00:01".into(),
+            song_link: Some("https://www.youtube.com/watch?v=x".into()),
+            ..Default::default()
+        };
+        assert!(m.streaming_urls().is_empty());
+    }
+
+    // ----- Serialize round-trip on every public model -----
+
+    #[test]
+    fn serialize_round_trip_recognition_result_typed_fields() {
+        // Deserialize a typical fixture, serialize it back, and verify the
+        // typed fields survive the round-trip. Extras (HashMap) may permute
+        // key order — that's fine; we re-parse and compare typed fields only.
+        let v = json!({
+            "artist": "Tears For Fears",
+            "title": "Everybody Wants To Rule The World",
+            "album": "Songs From The Big Chair",
+            "release_date": "1985-03-25",
+            "label": "Mercury Records",
+            "timecode": "00:56",
+            "song_link": "https://lis.tn/NbkVb",
+            "apple_music": {
+                "name": "Everybody Wants To Rule The World",
+                "artistName": "Tears For Fears",
+                "url": "https://music.apple.com/track/123",
+                "isrc": "GBF088400024"
+            },
+            "spotify": {
+                "id": "abc",
+                "name": "Everybody Wants To Rule The World",
+                "external_urls": {"spotify": "https://open.spotify.com/track/abc"}
+            },
+            "deezer": {"id": 9, "title": "Everybody Wants To Rule The World", "link": "https://deezer.com/track/9"},
+            "napster": {"id": "n1", "name": "X", "isrc": "GBF088400024"},
+            "musicbrainz": [{"id": "mb1", "title": "X"}],
+            "tidal": {"id": "t1"}
+        });
+        let original: RecognitionResult = serde_json::from_value(v).unwrap();
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let round_tripped: RecognitionResult = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(round_tripped.artist, original.artist);
+        assert_eq!(round_tripped.title, original.title);
+        assert_eq!(round_tripped.album, original.album);
+        assert_eq!(round_tripped.release_date, original.release_date);
+        assert_eq!(round_tripped.label, original.label);
+        assert_eq!(round_tripped.timecode, original.timecode);
+        assert_eq!(round_tripped.song_link, original.song_link);
+        assert_eq!(round_tripped.apple_music, original.apple_music);
+        assert_eq!(round_tripped.spotify, original.spotify);
+        assert_eq!(round_tripped.deezer, original.deezer);
+        assert_eq!(round_tripped.napster, original.napster);
+        assert_eq!(round_tripped.musicbrainz, original.musicbrainz);
+        // Extras (HashMap) — key order may permute on serialize; compare the
+        // forward-compat field by lookup.
+        assert_eq!(
+            round_tripped.extras.get("tidal").and_then(|v| v.get("id")),
+            original.extras.get("tidal").and_then(|v| v.get("id"))
+        );
+    }
+
+    #[test]
+    fn serialize_round_trip_enterprise_chunk() {
+        let v = json!({
+            "songs": [{
+                "score": 95,
+                "timecode": "00:00",
+                "artist": "X",
+                "title": "Y",
+                "song_link": "https://lis.tn/abc",
+                "isrc": "AAA",
+                "upc": "BBB",
+                "start_offset": 0,
+                "end_offset": 30
+            }],
+            "offset": "00:00"
+        });
+        let original: EnterpriseChunkResult = serde_json::from_value(v).unwrap();
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let round_tripped: EnterpriseChunkResult = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(round_tripped.offset, original.offset);
+        assert_eq!(round_tripped.songs.len(), 1);
+        assert_eq!(round_tripped.songs[0], original.songs[0]);
+    }
+
+    #[test]
+    fn serialize_round_trip_stream() {
+        let s = Stream {
+            radio_id: 42,
+            url: "https://stream.example/live".into(),
+            stream_running: true,
+            longpoll_category: Some("abc123".into()),
+            extras: HashMap::new(),
+        };
+        let bytes = serde_json::to_vec(&s).unwrap();
+        let round_tripped: Stream = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(round_tripped, s);
+    }
+
+    #[test]
+    fn serialize_round_trip_callback_payload_result() {
+        let body = json!({
+            "status": "success",
+            "result": {
+                "radio_id": 7,
+                "timestamp": "2020-04-13 10:31:43",
+                "play_length": 111,
+                "results": [{
+                    "artist": "X",
+                    "title": "Y",
+                    "score": 100,
+                    "song_link": "https://lis.tn/abc"
+                }]
+            }
+        });
+        let original = StreamCallbackPayload::parse(body).unwrap();
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let round_tripped: StreamCallbackPayload = serde_json::from_slice(&bytes).unwrap();
+        assert!(round_tripped.is_result());
+        assert_eq!(round_tripped.result, original.result);
+        assert_eq!(round_tripped.notification, original.notification);
+        assert_eq!(round_tripped.time, original.time);
+    }
+
+    #[test]
+    fn serialize_round_trip_callback_payload_notification() {
+        let body = json!({
+            "status": "-",
+            "notification": {
+                "radio_id": 3,
+                "stream_running": false,
+                "notification_code": 650,
+                "notification_message": "x"
+            },
+            "time": 1
+        });
+        let original = StreamCallbackPayload::parse(body).unwrap();
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let round_tripped: StreamCallbackPayload = serde_json::from_slice(&bytes).unwrap();
+        assert!(round_tripped.is_notification());
+        assert_eq!(round_tripped.notification, original.notification);
+        assert_eq!(round_tripped.time, Some(1));
+    }
+
+    #[test]
+    fn serialize_round_trip_lyrics_result() {
+        let l = LyricsResult {
+            artist: "Tears For Fears".into(),
+            title: "Everybody Wants To Rule The World".into(),
+            lyrics: Some("Welcome to your life…".into()),
+            song_id: Some(1),
+            media: Some("https://media.example/x".into()),
+            full_title: Some("Tears For Fears – Everybody Wants To Rule The World".into()),
+            artist_id: Some(99),
+            song_link: Some("https://lis.tn/abc".into()),
+            extras: HashMap::new(),
+        };
+        let bytes = serde_json::to_vec(&l).unwrap();
+        let round_tripped: LyricsResult = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(round_tripped, l);
+    }
+
+    #[test]
+    fn serialize_round_trip_streaming_provider() {
+        for (provider, wire) in [
+            (StreamingProvider::Spotify, "\"spotify\""),
+            (StreamingProvider::AppleMusic, "\"apple_music\""),
+            (StreamingProvider::Deezer, "\"deezer\""),
+            (StreamingProvider::Napster, "\"napster\""),
+            (StreamingProvider::YouTube, "\"youtube\""),
+        ] {
+            let s = serde_json::to_string(&provider).unwrap();
+            assert_eq!(s, wire, "{provider:?} should serialize as {wire}");
+            let back: StreamingProvider = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, provider);
+        }
+    }
+
+    #[test]
+    fn serialize_round_trip_recognition_match_tagged() {
+        let r = RecognitionResult {
+            timecode: "00:01".into(),
+            audio_id: Some(7),
+            ..Default::default()
+        };
+        let m = RecognitionMatch::from(r);
+        let s = serde_json::to_value(&m).unwrap();
+        // Tagged: {"kind":"custom","result":{...}}
+        assert_eq!(s.get("kind").and_then(|v| v.as_str()), Some("custom"));
+        let back: RecognitionMatch = serde_json::from_value(s).unwrap();
+        assert_eq!(back, m);
+    }
+}
