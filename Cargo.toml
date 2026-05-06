@@ -1,0 +1,97 @@
+[package]
+name = "audd"
+version = "1.5.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "Official Rust SDK for the AudD music recognition API"
+repository = "https://github.com/AudDMusic/audd-rust"
+homepage = "https://audd.io"
+documentation = "https://docs.rs/audd"
+keywords = ["audd", "music", "recognition", "audio", "fingerprint"]
+categories = ["api-bindings", "multimedia::audio"]
+readme = "README.md"
+exclude = ["tests/integration*", ".github/*"]
+
+[features]
+# `rustls-tls` is the default and matches the v0.2 behavior (Mozilla CA bundle,
+# pure-Rust TLS stack). Opt out with `default-features = false` and enable
+# `native-tls` (or `vendored-openssl`) when you need OpenSSL — corp environments
+# with custom CA trust stores, OpenSSL FIPS, etc.
+default = ["rustls-tls"]
+rustls-tls = ["reqwest/rustls-tls"]
+native-tls = ["reqwest/native-tls"]
+# Statically links a vendored copy of OpenSSL — useful when the build host
+# lacks `libssl-dev` / pkg-config OpenSSL headers but you still need the
+# OpenSSL TLS stack at runtime.
+vendored-openssl = ["reqwest/native-tls", "reqwest/native-tls-vendored"]
+# Opt-in live-API integration tests; gate via env var AUDD_API_TOKEN.
+integration = []
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
+thiserror = "1"
+tracing = "0.1"
+futures-core = "0.3"
+async-stream = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+md5 = "0.7"
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "test-util", "signal"] }
+tokio-test = "0.4"
+wiremock = "0.6"
+serde_json = "1"
+tempfile = "3"
+futures-util = "0.3"
+# Used by the `scan_and_rename` example.
+clap = { version = "4", features = ["derive"] }
+walkdir = "2"
+lofty = "0.22"
+# Used by the `stream_to_csv` example.
+csv = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[[example]]
+name = "recognize_url"
+path = "examples/recognize_url.rs"
+
+[[example]]
+name = "recognize_file"
+path = "examples/recognize_file.rs"
+
+[[example]]
+name = "recognize_enterprise"
+path = "examples/recognize_enterprise.rs"
+
+[[example]]
+name = "streams_setup"
+path = "examples/streams_setup.rs"
+
+[[example]]
+name = "streams_longpoll"
+path = "examples/streams_longpoll.rs"
+
+[[example]]
+name = "streams_callback_handler"
+path = "examples/streams_callback_handler.rs"
+
+[[example]]
+name = "custom_catalog_add"
+path = "examples/custom_catalog_add.rs"
+
+[[example]]
+name = "tokenless_longpoll"
+path = "examples/tokenless_longpoll.rs"
+
+[[example]]
+name = "scan_and_rename"
+path = "examples/scan_and_rename.rs"
+
+[[example]]
+name = "stream_to_csv"
+path = "examples/stream_to_csv.rs"
