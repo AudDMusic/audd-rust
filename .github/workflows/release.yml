@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'audd-rust/v*'
+      - 'v*'
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify the crate builds
+        run: cargo build --release
+      - name: cargo package (sanity)
+        run: cargo package --no-verify
+      - name: Generate Sigstore attestations
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: 'target/package/audd-*.crate'
+      - name: cargo publish
+        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }}
