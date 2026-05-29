@@ -1,0 +1,45 @@
+name: Contract tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * *'  # daily at 06:00 UTC
+  repository_dispatch:
+    types: [openapi-updated]
+
+jobs:
+  contract:
+    name: validate parser against latest audd-openapi fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: audd-rust
+      - name: Check out audd-openapi
+        uses: actions/checkout@v4
+        with:
+          repository: AudDMusic/audd-openapi
+          path: audd-openapi
+          ref: main
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: audd-rust
+      - name: Run contract tests
+        working-directory: audd-rust
+        env:
+          AUDD_OPENAPI_FIXTURES: ${{ github.workspace }}/audd-openapi/fixtures
+        run: cargo test --test contract -- --nocapture
+      - name: Open issue on failure (dispatched runs only)
+        if: failure() && github.event_name == 'repository_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRIGGER_SHA: ${{ github.event.client_payload.trigger_sha }}
+        run: |
+          gh issue create \
+            --title "Contract drift: audd-openapi spec change broke parser" \
+            --body "An openapi-updated dispatch (trigger SHA: $TRIGGER_SHA) caused contract tests to fail. Investigate and update parsers." \
+            --label "contract-drift" || true
