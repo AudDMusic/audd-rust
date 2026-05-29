@@ -162,7 +162,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(notif) = poll.notifications.next() => {
                 eprintln!(
                     "[notification] radio_id={} code={} {}",
-                    notif.radio_id, notif.notification_code, notif.notification_message,
+                    notif.radio_id.unwrap_or_default(),
+                    notif.notification_code.unwrap_or_default(),
+                    notif.notification_message.as_deref().unwrap_or(""),
                 );
             }
             Some(m) = poll.matches.next() => {
@@ -232,11 +234,11 @@ fn handle_match(
     for entry in std::iter::once(&m.song).chain(m.alternatives.iter()) {
         writer.write_record([
             received_at.as_str(),
-            &m.radio_id.to_string(),
+            &m.radio_id.map(|r| r.to_string()).unwrap_or_default(),
             m.timestamp.as_deref().unwrap_or(""),
-            &entry.score.to_string(),
-            entry.artist.as_str(),
-            entry.title.as_str(),
+            &entry.score.map(|s| s.to_string()).unwrap_or_default(),
+            entry.artist.as_deref().unwrap_or(""),
+            entry.title.as_deref().unwrap_or(""),
             entry.album.as_deref().unwrap_or(""),
             entry.song_link.as_deref().unwrap_or(""),
         ])?;
@@ -244,10 +246,10 @@ fn handle_match(
     writer.flush()?;
     println!(
         "[match] radio_id={} timestamp={} {} — {}",
-        m.radio_id,
+        m.radio_id.unwrap_or_default(),
         m.timestamp.as_deref().unwrap_or(""),
-        m.song.artist,
-        m.song.title,
+        m.song.artist.as_deref().unwrap_or(""),
+        m.song.title.as_deref().unwrap_or(""),
     );
     Ok(())
 }

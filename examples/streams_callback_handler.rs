@@ -36,16 +36,24 @@ async fn main() -> Result<(), AudDError> {
         CallbackEvent::Match(m) => {
             println!(
                 "[match] radio_id={} {} — {}",
-                m.radio_id, m.song.artist, m.song.title,
+                m.radio_id.unwrap_or_default(),
+                m.song.artist.as_deref().unwrap_or(""),
+                m.song.title.as_deref().unwrap_or(""),
             );
             for alt in &m.alternatives {
-                println!("  alternative: {} — {}", alt.artist, alt.title);
+                println!(
+                    "  alternative: {} — {}",
+                    alt.artist.as_deref().unwrap_or(""),
+                    alt.title.as_deref().unwrap_or(""),
+                );
             }
         }
         CallbackEvent::Notification(n) => {
             println!(
                 "[notification] radio_id={} code={} {}",
-                n.radio_id, n.notification_code, n.notification_message,
+                n.radio_id.unwrap_or_default(),
+                n.notification_code.unwrap_or_default(),
+                n.notification_message.as_deref().unwrap_or(""),
             );
         }
     }

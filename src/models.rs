@@ -253,7 +253,8 @@ pub struct MusicBrainzEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct RecognitionResult {
     /// Position in the source where the match starts (e.g., `"00:56"`).
-    pub timecode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timecode: Option<String>,
     /// Set on custom-catalog matches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_id: Option<i64>,
@@ -508,11 +509,12 @@ impl RecognitionMatch {
 /// One match in an enterprise-recognition response.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct EnterpriseMatch {
-    /// Match score (0–100).
-    #[serde(default)]
-    pub score: i32,
+    /// Match score (0–100). Absent on some enterprise matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<i32>,
     /// Position in the source where the match starts.
-    pub timecode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timecode: Option<String>,
     /// Artist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artist: Option<String>,
@@ -597,9 +599,11 @@ pub struct EnterpriseChunkResult {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Stream {
     /// Caller-chosen integer ID for the stream.
-    pub radio_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radio_id: Option<i64>,
     /// Source URL the stream is reading from.
-    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// Whether AudD is currently consuming and recognizing the stream.
     #[serde(default)]
     pub stream_running: bool,
@@ -621,11 +625,14 @@ pub struct Stream {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct StreamCallbackSong {
     /// Artist.
-    pub artist: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
     /// Title.
-    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Match score.
-    pub score: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<i32>,
     /// Album.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album: Option<String>,
@@ -678,7 +685,7 @@ pub struct StreamCallbackSong {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamCallbackMatch {
     /// Stream the callback is for.
-    pub radio_id: i64,
+    pub radio_id: Option<i64>,
     /// Wall-clock timestamp the recognition fired at.
     pub timestamp: Option<String>,
     /// Length of the recognized segment, in seconds.
@@ -706,14 +713,17 @@ pub struct StreamCallbackMatch {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct StreamCallbackNotification {
     /// Stream the notification is for.
-    pub radio_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radio_id: Option<i64>,
     /// Whether the stream is currently running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_running: Option<bool>,
     /// Numeric notification code.
-    pub notification_code: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_code: Option<i32>,
     /// Human-readable notification text.
-    pub notification_message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_message: Option<String>,
     /// Outer-envelope `time` field (server-emitted unix-seconds), if present.
     /// Sibling of `notification` in the wire payload — hoisted here for
     /// convenience. Skipped on serialize when `None`.
@@ -739,26 +749,32 @@ impl<'de> Deserialize<'de> for StreamCallbackMatch {
         // typed fields, and route the rest into `extras`.
         let mut map: serde_json::Map<String, Value> = Deserialize::deserialize(deserializer)?;
 
-        let radio_id = map
-            .remove("radio_id")
-            .ok_or_else(|| serde::de::Error::missing_field("radio_id"))
-            .and_then(|v| serde_json::from_value(v).map_err(serde::de::Error::custom))?;
+        // A successful response must never fail to parse on a missing or
+        // wrong-typed field. `radio_id` / `timestamp` / `play_length` decode
+        // leniently: absent, null, or an unexpected type all yield `None`
+        // rather than a hard error.
+        let radio_id = match map.remove("radio_id") {
+            Some(v) => serde_json::from_value(v).ok(),
+            None => None,
+        };
         let timestamp = match map.remove("timestamp") {
             Some(Value::Null) | None => None,
-            Some(v) => Some(serde_json::from_value(v).map_err(serde::de::Error::custom)?),
+            Some(v) => serde_json::from_value(v).ok(),
         };
         let play_length = match map.remove("play_length") {
             Some(Value::Null) | None => None,
-            Some(v) => Some(serde_json::from_value(v).map_err(serde::de::Error::custom)?),
+            Some(v) => serde_json::from_value(v).ok(),
         };
         let results: Vec<StreamCallbackSong> = match map.remove("results") {
-            Some(v) => serde_json::from_value(v).map_err(serde::de::Error::custom)?,
+            // A missing or non-array `results` deserializes to an empty Vec
+            // rather than erroring.
+            Some(v) => serde_json::from_value(v).unwrap_or_default(),
             None => Vec::new(),
         };
         let mut iter = results.into_iter();
-        let song = iter
-            .next()
-            .ok_or_else(|| serde::de::Error::custom("callback result.results is empty"))?;
+        // Empty `results` is tolerated: `song` defaults to an empty
+        // `StreamCallbackSong` (all fields optional) instead of erroring.
+        let song = iter.next().unwrap_or_default();
         let alternatives = iter.collect();
 
         // Remaining keys are extras.
@@ -788,10 +804,14 @@ impl Serialize for StreamCallbackMatch {
         if self.play_length.is_some() {
             len += 1;
         }
-        len += 1; // radio_id
+        if self.radio_id.is_some() {
+            len += 1;
+        }
         len += self.extras.len();
         let mut map = serializer.serialize_map(Some(len))?;
-        map.serialize_entry("radio_id", &self.radio_id)?;
+        if let Some(r) = &self.radio_id {
+            map.serialize_entry("radio_id", r)?;
+        }
         if let Some(t) = &self.timestamp {
             map.serialize_entry("timestamp", t)?;
         }
@@ -855,9 +875,11 @@ impl CallbackEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct LyricsResult {
     /// Artist name.
-    pub artist: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
     /// Song title.
-    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Lyrics text, if AudD has them indexed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lyrics: Option<String>,
@@ -915,7 +937,7 @@ mod tests {
     #[test]
     fn match_enum() {
         let r = RecognitionResult {
-            timecode: "x".into(),
+            timecode: Some("x".into()),
             audio_id: Some(1),
             ..Default::default()
         };
@@ -939,7 +961,7 @@ mod tests {
     #[test]
     fn youtube_link_no_thumb() {
         let r = RecognitionResult {
-            timecode: "00:01".into(),
+            timecode: Some("00:01".into()),
             song_link: Some("https://www.youtube.com/watch?v=abc".into()),
             ..Default::default()
         };
@@ -949,7 +971,7 @@ mod tests {
     #[test]
     fn thumb_with_existing_query() {
         let r = RecognitionResult {
-            timecode: "00:01".into(),
+            timecode: Some("00:01".into()),
             song_link: Some("https://lis.tn/abc?utm=x".into()),
             ..Default::default()
         };
@@ -971,12 +993,12 @@ mod tests {
             ]
         });
         let m: StreamCallbackMatch = serde_json::from_value(v).unwrap();
-        assert_eq!(m.radio_id, 7);
+        assert_eq!(m.radio_id, Some(7));
         assert_eq!(m.timestamp.as_deref(), Some("2020-04-13 10:31:43"));
         assert_eq!(m.play_length, Some(111));
-        assert_eq!(m.song.title, "Y");
+        assert_eq!(m.song.title.as_deref(), Some("Y"));
         assert_eq!(m.alternatives.len(), 1);
-        assert_eq!(m.alternatives[0].title, "Y (Remix)");
+        assert_eq!(m.alternatives[0].title.as_deref(), Some("Y (Remix)"));
     }
 
     #[test]
@@ -997,10 +1019,15 @@ mod tests {
     }
 
     #[test]
-    fn stream_callback_match_empty_results_errors() {
+    fn stream_callback_match_empty_results_parses_to_default_song() {
+        // A successful callback with an empty `results` array must never error;
+        // `song` defaults to an empty StreamCallbackSong and there are no
+        // alternatives.
         let v = json!({"radio_id": 1, "results": []});
-        let err = serde_json::from_value::<StreamCallbackMatch>(v).unwrap_err();
-        assert!(format!("{err}").contains("empty"));
+        let m: StreamCallbackMatch = serde_json::from_value(v).unwrap();
+        assert_eq!(m.radio_id, Some(1));
+        assert_eq!(m.song, StreamCallbackSong::default());
+        assert!(m.alternatives.is_empty());
     }
 
     #[test]
@@ -1016,34 +1043,34 @@ mod tests {
         let original: StreamCallbackMatch = serde_json::from_value(v).unwrap();
         let bytes = serde_json::to_vec(&original).unwrap();
         let back: StreamCallbackMatch = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(back.radio_id, 9);
-        assert_eq!(back.song.title, "Y");
+        assert_eq!(back.radio_id, Some(9));
+        assert_eq!(back.song.title.as_deref(), Some("Y"));
         assert_eq!(back.song.song_link.as_deref(), Some("https://lis.tn/abc"));
     }
 
     #[test]
     fn stream_callback_notification_round_trip() {
         let n = StreamCallbackNotification {
-            radio_id: 3,
+            radio_id: Some(3),
             stream_running: Some(false),
-            notification_code: 650,
-            notification_message: "x".into(),
+            notification_code: Some(650),
+            notification_message: Some("x".into()),
             time: Some(1),
             extras: HashMap::new(),
             raw_response: Value::Null,
         };
         let bytes = serde_json::to_vec(&n).unwrap();
         let back: StreamCallbackNotification = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(back.radio_id, 3);
-        assert_eq!(back.notification_code, 650);
+        assert_eq!(back.radio_id, Some(3));
+        assert_eq!(back.notification_code, Some(650));
         assert_eq!(back.time, Some(1));
     }
 
     #[test]
     fn enterprise_match_thumb() {
         let m = EnterpriseMatch {
-            score: 80,
-            timecode: "00:01".into(),
+            score: Some(80),
+            timecode: Some("00:01".into()),
             song_link: Some("https://lis.tn/abc".into()),
             ..Default::default()
         };
@@ -1177,8 +1204,8 @@ mod tests {
     #[test]
     fn enterprise_match_streaming_urls_lis_tn_only() {
         let m = EnterpriseMatch {
-            score: 90,
-            timecode: "00:01".into(),
+            score: Some(90),
+            timecode: Some("00:01".into()),
             song_link: Some("https://lis.tn/abc".into()),
             ..Default::default()
         };
@@ -1193,8 +1220,8 @@ mod tests {
     #[test]
     fn enterprise_match_streaming_urls_empty_for_youtube() {
         let m = EnterpriseMatch {
-            score: 90,
-            timecode: "00:01".into(),
+            score: Some(90),
+            timecode: Some("00:01".into()),
             song_link: Some("https://www.youtube.com/watch?v=x".into()),
             ..Default::default()
         };
@@ -1281,10 +1308,42 @@ mod tests {
     }
 
     #[test]
+    fn enterprise_song_without_score_parses() {
+        // Regression: the enterprise endpoint legitimately returns songs with
+        // no `score` (and no `isrc`/`upc`/`label`). Parsing must succeed and
+        // leave the absent fields as `None` — never a deserialization error.
+        let v = json!({
+            "songs": [{
+                "timecode": "00:00",
+                "artist": "X",
+                "title": "Y"
+            }],
+            "offset": "00:00"
+        });
+        let chunk: EnterpriseChunkResult = serde_json::from_value(v).unwrap();
+        assert_eq!(chunk.songs.len(), 1);
+        let song = &chunk.songs[0];
+        assert_eq!(song.score, None);
+        assert_eq!(song.isrc, None);
+        assert_eq!(song.upc, None);
+        assert_eq!(song.label, None);
+        assert_eq!(song.artist.as_deref(), Some("X"));
+    }
+
+    #[test]
+    fn enterprise_match_missing_timecode_parses() {
+        // A match with no `timecode` must parse rather than error.
+        let v = json!({"artist": "X", "title": "Y"});
+        let m: EnterpriseMatch = serde_json::from_value(v).unwrap();
+        assert_eq!(m.timecode, None);
+        assert_eq!(m.score, None);
+    }
+
+    #[test]
     fn serialize_round_trip_stream() {
         let s = Stream {
-            radio_id: 42,
-            url: "https://stream.example/live".into(),
+            radio_id: Some(42),
+            url: Some("https://stream.example/live".into()),
             stream_running: true,
             longpoll_category: Some("abc123".into()),
             extras: HashMap::new(),
@@ -1297,8 +1356,8 @@ mod tests {
     #[test]
     fn serialize_round_trip_lyrics_result() {
         let l = LyricsResult {
-            artist: "Tears For Fears".into(),
-            title: "Everybody Wants To Rule The World".into(),
+            artist: Some("Tears For Fears".into()),
+            title: Some("Everybody Wants To Rule The World".into()),
             lyrics: Some("Welcome to your life…".into()),
             song_id: Some(1),
             media: Some("https://media.example/x".into()),
@@ -1331,7 +1390,7 @@ mod tests {
     #[test]
     fn serialize_round_trip_recognition_match_tagged() {
         let r = RecognitionResult {
-            timecode: "00:01".into(),
+            timecode: Some("00:01".into()),
             audio_id: Some(7),
             ..Default::default()
         };

@@ -49,7 +49,7 @@ fn recognize_basic() {
     assert_eq!(payload["status"], "success");
     let result: RecognitionResult = serde_json::from_value(payload["result"].clone()).unwrap();
     assert!(result.artist.is_some());
-    assert!(!result.timecode.is_empty());
+    assert!(result.timecode.as_deref().is_some_and(|t| !t.is_empty()));
     assert!(result.is_public_match());
 }
 
@@ -82,7 +82,7 @@ fn enterprise_with_isrc_upc() {
     let s = &songs[0];
     assert!(s.isrc.is_some());
     assert!(s.upc.is_some());
-    assert!(s.score >= 0);
+    assert!(s.score.is_none_or(|sc| sc >= 0));
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn callback_with_result() {
     let payload = load_or_skip!("streams_callback_with_result.json");
     let ev = parse_callback(payload).unwrap();
     let m = ev.as_match().expect("should be a match");
-    assert_eq!(m.radio_id, 7);
+    assert_eq!(m.radio_id, Some(7));
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn callback_with_notification() {
     let payload = load_or_skip!("streams_callback_with_notification.json");
     let ev = parse_callback(payload).unwrap();
     let n = ev.as_notification().expect("should be a notification");
-    assert_eq!(n.notification_code, 650);
+    assert_eq!(n.notification_code, Some(650));
 }
 
 #[test]

@@ -934,7 +934,7 @@ mod tests {
         });
         let v = decode_enterprise(resp_ok(body)).unwrap();
         assert_eq!(v.len(), 1);
-        assert_eq!(v[0].score, 80);
+        assert_eq!(v[0].score, Some(80));
     }
 
     /// Serializes env-var-mutating tests in this module so they don't race

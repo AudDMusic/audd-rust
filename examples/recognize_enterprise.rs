@@ -23,7 +23,7 @@ async fn main() -> Result<(), AudDError> {
     for m in matches {
         println!(
             "[{}] {} — {}",
-            m.timecode,
+            m.timecode.as_deref().unwrap_or(""),
             m.artist.as_deref().unwrap_or(""),
             m.title.as_deref().unwrap_or("")
         );

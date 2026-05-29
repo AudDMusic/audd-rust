@@ -196,8 +196,8 @@ mod tests {
         });
         let ev = parse_callback(body).unwrap();
         let m = ev.as_match().expect("should be a match");
-        assert_eq!(m.radio_id, 7);
-        assert_eq!(m.song.title, "Y");
+        assert_eq!(m.radio_id, Some(7));
+        assert_eq!(m.song.title.as_deref(), Some("Y"));
         assert!(m.alternatives.is_empty());
     }
 
@@ -215,8 +215,8 @@ mod tests {
         });
         let ev = parse_callback(body).unwrap();
         let n = ev.as_notification().expect("should be a notification");
-        assert_eq!(n.radio_id, 3);
-        assert_eq!(n.notification_code, 650);
+        assert_eq!(n.radio_id, Some(3));
+        assert_eq!(n.notification_code, Some(650));
         assert_eq!(n.time, Some(1));
     }
 
@@ -225,7 +225,7 @@ mod tests {
         let bytes =
             br#"{"result":{"radio_id":1,"results":[{"artist":"X","title":"Y","score":50}]}}"#;
         let ev = handle_callback(bytes.as_slice()).unwrap();
-        assert_eq!(ev.as_match().unwrap().song.score, 50);
+        assert_eq!(ev.as_match().unwrap().song.score, Some(50));
     }
 
     #[test]

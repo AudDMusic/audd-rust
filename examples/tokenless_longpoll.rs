@@ -30,13 +30,17 @@ async fn main() -> Result<(), AudDError> {
             Some(notif) = poll.notifications.next() => {
                 eprintln!(
                     "[notification] radio_id={} code={} {}",
-                    notif.radio_id, notif.notification_code, notif.notification_message,
+                    notif.radio_id.unwrap_or_default(),
+                    notif.notification_code.unwrap_or_default(),
+                    notif.notification_message.as_deref().unwrap_or(""),
                 );
             }
             Some(m) = poll.matches.next() => {
                 println!(
                     "[match] radio_id={} {} — {}",
-                    m.radio_id, m.song.artist, m.song.title,
+                    m.radio_id.unwrap_or_default(),
+                    m.song.artist.as_deref().unwrap_or(""),
+                    m.song.title.as_deref().unwrap_or(""),
                 );
             }
             else => break,

@@ -23,7 +23,12 @@ async fn main() -> Result<(), AudDError> {
 
     // 3. List streams.
     for s in audd.streams().list().await? {
-        println!("{}\t{}\t{}", s.radio_id, s.url, s.stream_running);
+        println!(
+            "{}\t{}\t{}",
+            s.radio_id.unwrap_or_default(),
+            s.url.as_deref().unwrap_or(""),
+            s.stream_running
+        );
     }
 
     Ok(())

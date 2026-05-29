@@ -244,8 +244,8 @@ async fn streams_longpoll_skip_check_runs_and_absorbs_keepalive() {
         .await
         .unwrap();
     let m = poll.matches.next().await.expect("should get a match");
-    assert_eq!(m.radio_id, 9);
-    assert_eq!(m.song.title, "Y");
+    assert_eq!(m.radio_id, Some(9));
+    assert_eq!(m.song.title.as_deref(), Some("Y"));
     poll.close().await;
 }
 
@@ -285,7 +285,7 @@ async fn streams_longpoll_surfaces_notifications() {
         .next()
         .await
         .expect("should get a notification");
-    assert_eq!(n.notification_code, 650);
+    assert_eq!(n.notification_code, Some(650));
     assert_eq!(n.time, Some(1_700_000_000));
     poll.close().await;
 }
@@ -316,7 +316,7 @@ async fn enterprise_returns_matches() {
         .await
         .unwrap();
     assert_eq!(v.len(), 1);
-    assert_eq!(v[0].score, 81);
+    assert_eq!(v[0].score, Some(81));
 }
 
 #[tokio::test]
@@ -351,8 +351,8 @@ async fn tokenless_longpoll_absorbs_keepalive_and_yields_match() {
         ..Default::default()
     });
     let m = poll.matches.next().await.expect("should get a match");
-    assert_eq!(m.radio_id, 5);
-    assert_eq!(m.song.artist, "A");
+    assert_eq!(m.radio_id, Some(5));
+    assert_eq!(m.song.artist.as_deref(), Some("A"));
     poll.close().await;
 }
 
@@ -570,7 +570,7 @@ async fn advanced_find_lyrics() {
         .unwrap();
     let v = audd.advanced().find_lyrics("rule").await.unwrap();
     assert_eq!(v.len(), 1);
-    assert_eq!(v[0].artist, "X");
+    assert_eq!(v[0].artist.as_deref(), Some("X"));
 }
 
 // ----- AudDEvent emission on real recognize round-trip -----
@@ -669,8 +669,8 @@ async fn streams_longpoll_by_radio_id_uses_derived_category() {
         .await
         .unwrap();
     let m = poll.matches.next().await.expect("should get a match");
-    assert_eq!(m.radio_id, radio_id);
-    assert_eq!(m.song.title, "Y");
+    assert_eq!(m.radio_id, Some(radio_id));
+    assert_eq!(m.song.title.as_deref(), Some("Y"));
     poll.close().await;
 }
 
@@ -709,7 +709,7 @@ async fn streams_longpoll_category_string_form_still_works() {
         .await
         .unwrap();
     let m = poll.matches.next().await.expect("should get a match");
-    assert_eq!(m.radio_id, 7);
-    assert_eq!(m.song.title, "Z");
+    assert_eq!(m.radio_id, Some(7));
+    assert_eq!(m.song.title.as_deref(), Some("Z"));
     poll.close().await;
 }
