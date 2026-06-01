@@ -539,15 +539,54 @@ pub struct EnterpriseMatch {
     /// AudD-hosted song-link URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub song_link: Option<String>,
-    /// Start offset of the match in the source (in seconds).
+    /// Raw fragment-relative start offset, in milliseconds within the 12s
+    /// fragment this match was found in. Use [`Self::start_seconds`] for the
+    /// position in the user's file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_offset: Option<i64>,
-    /// End offset of the match in the source (in seconds).
+    /// Raw fragment-relative end offset, in milliseconds within the 12s
+    /// fragment. Use [`Self::end_seconds`] for the position in the user's file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_offset: Option<i64>,
+    /// Where the match starts in the user's file, in seconds: the chunk's
+    /// `offset` plus the fragment-relative `start_offset`. Computed by the SDK
+    /// (not a wire field). `None` when the chunk carries no parseable offset.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub start_seconds: Option<f64>,
+    /// Where the match ends in the user's file, in seconds: the chunk's
+    /// `offset` plus the fragment-relative `end_offset`. Computed by the SDK
+    /// (not a wire field). `None` when the chunk carries no parseable offset.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub end_seconds: Option<f64>,
     /// Forward-compat.
     #[serde(flatten)]
     pub extras: HashMap<String, Value>,
+}
+
+/// Parse a chunk `offset` string into seconds.
+///
+/// Accepts `"SS"`, `"MM:SS"`, `"HH:MM:SS"`, or a bare number. Returns `None`
+/// for any unparseable shape. Never panics.
+fn offset_to_seconds(o: Option<&str>) -> Option<f64> {
+    let s = o?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Bare number (e.g. "60" or "60.5"): parse directly.
+    if !s.contains(':') {
+        return s.parse::<f64>().ok();
+    }
+    // Colon-separated: SS, MM:SS, or HH:MM:SS.
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() > 3 {
+        return None;
+    }
+    let mut total = 0.0;
+    for p in &parts {
+        let n: f64 = p.trim().parse().ok()?;
+        total = total * 60.0 + n;
+    }
+    Some(total)
 }
 
 impl EnterpriseMatch {
@@ -587,12 +626,34 @@ pub struct EnterpriseChunkResult {
     /// Songs matched in this chunk.
     #[serde(default)]
     pub songs: Vec<EnterpriseMatch>,
-    /// Offset of this chunk in the source (e.g., `"00:00"`).
+    /// Offset of this chunk in the source (e.g., `"00:00"`). This is the
+    /// chunk's position in the user's file — the anchor for each song's
+    /// file-relative seconds.
     #[serde(default)]
     pub offset: String,
     /// Forward-compat.
     #[serde(flatten)]
     pub extras: HashMap<String, Value>,
+}
+
+impl EnterpriseChunkResult {
+    /// Stamp each song's [`EnterpriseMatch::start_seconds`] /
+    /// [`EnterpriseMatch::end_seconds`] from this chunk's `offset` (the
+    /// chunk's position in the user's file) plus the song's fragment-relative
+    /// `start_offset` / `end_offset` (milliseconds). Leaves them `None` when
+    /// the chunk's offset is absent or unparseable.
+    pub(crate) fn anchor_song_offsets(&mut self) {
+        let Some(base) = offset_to_seconds(Some(self.offset.as_str())) else {
+            return;
+        };
+        // ms → seconds. Offsets are small integers; the f64 cast is exact for
+        // every realistic value, so the precision-loss lint doesn't apply.
+        #[allow(clippy::cast_precision_loss)]
+        for s in &mut self.songs {
+            s.start_seconds = Some(base + s.start_offset.unwrap_or(0) as f64 / 1000.0);
+            s.end_seconds = Some(base + s.end_offset.unwrap_or(0) as f64 / 1000.0);
+        }
+    }
 }
 
 /// One row in the streams list.
@@ -1064,6 +1125,20 @@ mod tests {
         assert_eq!(back.radio_id, Some(3));
         assert_eq!(back.notification_code, Some(650));
         assert_eq!(back.time, Some(1));
+    }
+
+    #[test]
+    fn offset_to_seconds_parses_all_shapes() {
+        assert_eq!(offset_to_seconds(Some("60")), Some(60.0));
+        assert_eq!(offset_to_seconds(Some("01:04")), Some(64.0));
+        assert_eq!(offset_to_seconds(Some("00:01:00")), Some(60.0));
+        assert_eq!(offset_to_seconds(Some("01:02:03")), Some(3723.0));
+        assert_eq!(offset_to_seconds(Some("60.5")), Some(60.5));
+        // Unparseable / absent → None, never a panic.
+        assert_eq!(offset_to_seconds(Some("not-a-time")), None);
+        assert_eq!(offset_to_seconds(Some("")), None);
+        assert_eq!(offset_to_seconds(Some("1:2:3:4")), None);
+        assert_eq!(offset_to_seconds(None), None);
     }
 
     #[test]

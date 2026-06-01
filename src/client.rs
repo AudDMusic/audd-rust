@@ -684,7 +684,9 @@ pub struct EnterpriseOptions<'a> {
     pub skip_first_seconds: Option<i64>,
     /// Whether to attach timecodes to matches.
     pub use_timecode: Option<bool>,
-    /// Whether to compute precise per-segment offsets.
+    /// Whether to compute precise per-segment offsets. Defaults on: leaving
+    /// this unset (`None`) sends `accurate_offsets=true` so each match's
+    /// `start_seconds`/`end_seconds` are precise. Set `Some(false)` to opt out.
     pub accurate_offsets: Option<bool>,
     /// Per-call timeout override.
     pub timeout: Option<Duration>,
@@ -720,12 +722,17 @@ fn build_enterprise_fields(
             if v { "true".into() } else { "false".into() },
         ));
     }
-    if let Some(v) = opts.accurate_offsets {
-        fields.push((
-            "accurate_offsets",
-            if v { "true".into() } else { "false".into() },
-        ));
-    }
+    // Accurate offsets default on: an unset (`None`) option sends
+    // `accurate_offsets=true` so `start_seconds`/`end_seconds` are precise.
+    let accurate = opts.accurate_offsets.unwrap_or(true);
+    fields.push((
+        "accurate_offsets",
+        if accurate {
+            "true".into()
+        } else {
+            "false".into()
+        },
+    ));
     fields
 }
 
@@ -754,7 +761,15 @@ fn decode_enterprise(resp: HttpResponse) -> Result<Vec<EnterpriseMatch>, AudDErr
             message: format!("could not parse enterprise result: {e}"),
             raw_text: chunks_value.to_string(),
         })?;
-    Ok(chunks.into_iter().flat_map(|c| c.songs).collect())
+    // Each chunk's `offset` anchors its songs in the user's file. Stamp every
+    // song's file-relative start/end seconds from the chunk base, then flatten
+    // the songs across all chunks into one list.
+    let mut out: Vec<EnterpriseMatch> = Vec::new();
+    for mut chunk in chunks {
+        chunk.anchor_song_offsets();
+        out.extend(chunk.songs);
+    }
+    Ok(out)
 }
 
 /// Inspect a response and either return its body or raise the appropriate
@@ -935,6 +950,65 @@ mod tests {
         let v = decode_enterprise(resp_ok(body)).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].score, Some(80));
+    }
+
+    #[test]
+    fn enterprise_decode_anchors_offsets_in_file() {
+        // Two chunks: the first anchored at "00:01:00" with a song whose
+        // fragment-relative offsets are 4200/11800 ms → 64.2 / 71.8 s in the
+        // file. The second chunk carries no parseable offset → None.
+        let body = json!({
+            "status": "success",
+            "result": [
+                {
+                    "offset": "00:01:00",
+                    "songs": [{
+                        "score": 95,
+                        "timecode": "00:01:04",
+                        "start_offset": 4200,
+                        "end_offset": 11800
+                    }]
+                },
+                {
+                    "offset": "",
+                    "songs": [{
+                        "score": 80,
+                        "start_offset": 1000,
+                        "end_offset": 2000
+                    }]
+                }
+            ]
+        });
+        let v = decode_enterprise(resp_ok(body)).unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].start_seconds, Some(64.2));
+        assert_eq!(v[0].end_seconds, Some(71.8));
+        // Absent/unparseable chunk offset → no file anchor.
+        assert_eq!(v[1].start_seconds, None);
+        assert_eq!(v[1].end_seconds, None);
+    }
+
+    #[test]
+    fn enterprise_default_request_sends_accurate_offsets_true() {
+        // A default/unset EnterpriseOptions must send accurate_offsets=true so
+        // start_seconds/end_seconds come back precise.
+        let opts = EnterpriseOptions::default();
+        let fields = build_enterprise_fields(None, &opts);
+        assert!(fields
+            .iter()
+            .any(|(k, v)| *k == "accurate_offsets" && v == "true"));
+    }
+
+    #[test]
+    fn enterprise_explicit_accurate_offsets_false_opts_out() {
+        let opts = EnterpriseOptions {
+            accurate_offsets: Some(false),
+            ..Default::default()
+        };
+        let fields = build_enterprise_fields(None, &opts);
+        assert!(fields
+            .iter()
+            .any(|(k, v)| *k == "accurate_offsets" && v == "false"));
     }
 
     /// Serializes env-var-mutating tests in this module so they don't race

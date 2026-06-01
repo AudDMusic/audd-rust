@@ -151,7 +151,7 @@ for m in matches { println!("{}: {} — {}", m.timecode,
 # Ok(()) }
 ```
 
-Each `EnterpriseMatch` carries the same core tags plus `score`, `start_offset`, `end_offset`, `isrc`, `upc`. Access to `isrc`, `upc`, and `score` requires a Startup plan or higher — [contact us](mailto:api@audd.io) for enterprise features.
+Each `EnterpriseMatch` carries the same core tags plus `score`, `isrc`, `upc`, and a pair of offsets locating where the song plays in your file. `start_seconds` and `end_seconds` give that position in seconds, measured from the start of the file — precise because the SDK requests accurate offsets by default. Behind them, `start_offset`/`end_offset` are the raw fragment-relative offsets in milliseconds the server returned. Access to `isrc`, `upc`, and `score` requires a Startup plan or higher — [contact us](mailto:api@audd.io) for enterprise features.
 
 ## Reading additional metadata
 
