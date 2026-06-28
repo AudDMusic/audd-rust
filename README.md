@@ -1,5 +1,6 @@
 # audd-rust
 
+[![Powered by AudD](https://img.shields.io/badge/Music_Recognition-AudD_API-2a4eef)](https://audd.io)
 [![CI](https://github.com/AudDMusic/audd-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/AudDMusic/audd-rust/actions/workflows/ci.yml)
 [![Contract](https://github.com/AudDMusic/audd-rust/actions/workflows/contract.yml/badge.svg)](https://github.com/AudDMusic/audd-rust/actions/workflows/contract.yml)
 [![Crates.io](https://img.shields.io/crates/v/audd.svg)](https://crates.io/crates/audd)
