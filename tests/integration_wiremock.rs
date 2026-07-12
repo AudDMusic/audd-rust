@@ -176,7 +176,7 @@ async fn streams_get_callback_url() {
         .build()
         .unwrap();
     let url = audd.streams().get_callback_url().await.unwrap();
-    assert_eq!(url, "https://example.com/cb");
+    assert_eq!(url.as_deref(), Some("https://example.com/cb"));
 }
 
 #[tokio::test]
@@ -712,4 +712,222 @@ async fn streams_longpoll_category_string_form_still_works() {
     assert_eq!(m.radio_id, Some(7));
     assert_eq!(m.song.title.as_deref(), Some("Z"));
     poll.close().await;
+}
+
+// ----- Lenient parsing: wrong-typed response fields degrade to None -----
+
+#[tokio::test]
+async fn recognize_tolerates_wrong_typed_fields() {
+    // Numeric `timecode` + string `audio_id` must not fail the call; the
+    // wrong-typed fields degrade to None while the rest populates.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "success",
+            "result": {
+                "timecode": 56,
+                "audio_id": "146",
+                "artist": "X",
+                "title": "Y"
+            }
+        })))
+        .mount(&server)
+        .await;
+    let audd = AudD::builder("test")
+        .api_base(server.uri())
+        .build()
+        .unwrap();
+    let r = audd
+        .recognize("https://x.example/clip.mp3")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.timecode, None);
+    assert_eq!(r.audio_id, None);
+    assert_eq!(r.artist.as_deref(), Some("X"));
+}
+
+#[tokio::test]
+async fn recognize_enterprise_tolerates_string_score() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "success",
+            "result": [{
+                "offset": "0",
+                "songs": [{"score": "85", "timecode": 7, "artist": "A", "title": "T"}]
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let audd = AudD::builder("test")
+        .enterprise_base(server.uri())
+        .build()
+        .unwrap();
+    let v = audd
+        .recognize_enterprise("https://x.example/clip.mp3", EnterpriseOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].score, None, "string score degrades to None");
+    assert_eq!(v[0].timecode, None, "numeric timecode degrades to None");
+    assert_eq!(v[0].artist.as_deref(), Some("A"));
+}
+
+#[tokio::test]
+async fn streams_list_tolerates_wrong_typed_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/getStreams/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "success",
+            "result": [{"radio_id": "9", "url": "twitch:a", "stream_running": "true"}]
+        })))
+        .mount(&server)
+        .await;
+    let audd = AudD::builder("test")
+        .api_base(server.uri())
+        .build()
+        .unwrap();
+    let v = audd.streams().list().await.unwrap();
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].radio_id, None, "string radio_id degrades to None");
+    assert!(
+        !v[0].stream_running,
+        "string stream_running degrades to false"
+    );
+    assert_eq!(v[0].url.as_deref(), Some("twitch:a"));
+}
+
+// ----- Preflight: only the no-callback #19 is rewritten -----
+
+#[tokio::test]
+async fn streams_longpoll_preflight_passes_through_other_code_19() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/getCallbackUrl/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "error",
+            "error": {"error_code": 19, "error_message": "Scheduled maintenance, try again later"}
+        })))
+        .mount(&server)
+        .await;
+    let audd = AudD::builder("test")
+        .api_base(server.uri())
+        .build()
+        .unwrap();
+    let e = audd
+        .streams()
+        .longpoll("cat", LongpollOptions::default())
+        .await
+        .expect_err("preflight must fail");
+    assert_eq!(e.error_code(), Some(19), "a real #19 passes through: {e:?}");
+    assert!(
+        !e.to_string().contains("no callback URL"),
+        "must not be rewritten into the no-callback hint: {e}"
+    );
+}
+
+#[tokio::test]
+async fn streams_longpoll_preflight_rewrites_internal_error_signal() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/getCallbackUrl/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "error",
+            "error": {"error_code": 19, "error_message": "Internal error"}
+        })))
+        .mount(&server)
+        .await;
+    let audd = AudD::builder("test")
+        .api_base(server.uri())
+        .build()
+        .unwrap();
+    let e = audd
+        .streams()
+        .longpoll("cat", LongpollOptions::default())
+        .await
+        .expect_err("preflight must fail");
+    assert!(e.is_invalid_request(), "got {e:?}");
+    assert!(e.to_string().contains("no callback URL"), "got {e}");
+}
+
+// ----- get_callback_url: JSON null result yields None -----
+
+#[tokio::test]
+async fn streams_get_callback_url_null_result_is_none() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/getCallbackUrl/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "success",
+            "result": null
+        })))
+        .mount(&server)
+        .await;
+    let audd = AudD::builder("test")
+        .api_base(server.uri())
+        .build()
+        .unwrap();
+    let url = audd.streams().get_callback_url().await.unwrap();
+    assert_eq!(url, None, "a JSON-null result must be None, not \"null\"");
+}
+
+// ----- on_event fires for streams / custom-catalog / advanced calls -----
+
+#[tokio::test]
+async fn on_event_fires_for_streams_and_advanced_calls() {
+    use audd::{AudDEvent, EventKind, OnEventHook};
+    use std::sync::{Arc, Mutex};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/getStreams/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "success",
+            "result": []
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/someMethod/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "success",
+            "result": {}
+        })))
+        .mount(&server)
+        .await;
+
+    let captured: Arc<Mutex<Vec<AudDEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_hook = Arc::clone(&captured);
+    let hook: OnEventHook = Arc::new(move |e: &AudDEvent| {
+        captured_for_hook.lock().unwrap().push(e.clone());
+    });
+    let audd = AudD::builder("test")
+        .api_base(server.uri())
+        .on_event(hook)
+        .build()
+        .unwrap();
+
+    audd.streams().list().await.unwrap();
+    audd.advanced()
+        .raw_request("someMethod", &[])
+        .await
+        .unwrap();
+
+    let events = captured.lock().unwrap();
+    let responses: Vec<&AudDEvent> = events
+        .iter()
+        .filter(|e| e.kind == EventKind::Response)
+        .collect();
+    assert!(
+        responses.iter().any(|e| e.method == "getStreams"),
+        "streams calls must emit events, got {events:#?}"
+    );
+    assert!(
+        responses.iter().any(|e| e.method == "someMethod"),
+        "advanced raw requests must emit events, got {events:#?}"
+    );
 }

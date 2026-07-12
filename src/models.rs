@@ -68,6 +68,32 @@ const ALL_STREAMING_PROVIDERS: [StreamingProvider; 5] = [
     StreamingProvider::YouTube,
 ];
 
+/// Deserialize a response field best-effort: absent, `null`, or wrong-typed
+/// values all yield `None` instead of failing the whole response decode.
+///
+/// A successful response must never fail to parse because one field arrived
+/// with an unexpected type (e.g. a string `"score"` or a numeric `timecode`);
+/// the affected field degrades to `None` and everything else populates.
+fn lenient_opt<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(v).ok())
+}
+
+/// Like [`lenient_opt`] for non-`Option` fields: a wrong-typed value degrades
+/// to the type's default instead of failing the whole response decode.
+fn lenient_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let v = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
+}
+
 /// Build `"<song_link>?<provider>"` only when `song_link.host_str() == "lis.tn"`.
 ///
 /// Returns `None` for non-`lis.tn` hosts (e.g. YouTube song-links) and when
@@ -87,34 +113,54 @@ fn lis_tn_streaming_url(song_link: Option<&str>, provider: &str) -> Option<Strin
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct AppleMusicMetadata {
     /// Track title.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub name: Option<String>,
     /// Artist name as Apple labels it.
     #[serde(
         default,
+        deserialize_with = "lenient_opt",
         rename = "artistName",
         skip_serializing_if = "Option::is_none"
     )]
     pub artist_name: Option<String>,
     /// Album name as Apple labels it.
-    #[serde(default, rename = "albumName", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        rename = "albumName",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub album_name: Option<String>,
     /// Apple Music URL for the track.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub url: Option<String>,
     /// Track length in milliseconds.
     #[serde(
         default,
+        deserialize_with = "lenient_opt",
         rename = "durationInMillis",
         skip_serializing_if = "Option::is_none"
     )]
     pub duration_in_millis: Option<i64>,
     /// International Standard Recording Code.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub isrc: Option<String>,
     /// Track number on the disc.
     #[serde(
         default,
+        deserialize_with = "lenient_opt",
         rename = "trackNumber",
         skip_serializing_if = "Option::is_none"
     )]
@@ -122,6 +168,7 @@ pub struct AppleMusicMetadata {
     /// Composer credits.
     #[serde(
         default,
+        deserialize_with = "lenient_opt",
         rename = "composerName",
         skip_serializing_if = "Option::is_none"
     )]
@@ -129,6 +176,7 @@ pub struct AppleMusicMetadata {
     /// Disc number on a multi-disc release.
     #[serde(
         default,
+        deserialize_with = "lenient_opt",
         rename = "discNumber",
         skip_serializing_if = "Option::is_none"
     )]
@@ -136,6 +184,7 @@ pub struct AppleMusicMetadata {
     /// Apple's release date for the track.
     #[serde(
         default,
+        deserialize_with = "lenient_opt",
         rename = "releaseDate",
         skip_serializing_if = "Option::is_none"
     )]
@@ -149,28 +198,61 @@ pub struct AppleMusicMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct SpotifyMetadata {
     /// Spotify track ID.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub id: Option<String>,
     /// Track name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub name: Option<String>,
     /// Track length in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub duration_ms: Option<i64>,
     /// Whether the track is flagged explicit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub explicit: Option<bool>,
     /// Spotify popularity score (0–100).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub popularity: Option<i32>,
     /// Track number on the disc.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub track_number: Option<i32>,
     /// Spotify object type (typically `track`).
-    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        rename = "type",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub object_type: Option<String>,
     /// Spotify URI (e.g., `spotify:track:...`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub uri: Option<String>,
     /// Forward-compat: any unknown fields.
     #[serde(flatten)]
@@ -181,16 +263,32 @@ pub struct SpotifyMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct DeezerMetadata {
     /// Deezer track ID.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub id: Option<i64>,
     /// Track title.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub title: Option<String>,
     /// Track length in seconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub duration: Option<i64>,
     /// Web link to the track on Deezer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub link: Option<String>,
     /// Forward-compat.
     #[serde(flatten)]
@@ -201,23 +299,41 @@ pub struct DeezerMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct NapsterMetadata {
     /// Napster track ID.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub id: Option<String>,
     /// Track name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub name: Option<String>,
     /// ISRC.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub isrc: Option<String>,
     /// Artist name.
     #[serde(
         default,
+        deserialize_with = "lenient_opt",
         rename = "artistName",
         skip_serializing_if = "Option::is_none"
     )]
     pub artist_name: Option<String>,
     /// Album name.
-    #[serde(default, rename = "albumName", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        rename = "albumName",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub album_name: Option<String>,
     /// Forward-compat.
     #[serde(flatten)]
@@ -228,16 +344,28 @@ pub struct NapsterMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct MusicBrainzEntry {
     /// MusicBrainz recording ID.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_or_default")]
     pub id: String,
     /// Match score, often a number but sometimes serialized as a string.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub score: Option<Value>,
     /// Recording title.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub title: Option<String>,
     /// Recording length in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub length: Option<i64>,
     /// Forward-compat: any unknown fields.
     #[serde(flatten)]
@@ -253,49 +381,109 @@ pub struct MusicBrainzEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct RecognitionResult {
     /// Position in the source where the match starts (e.g., `"00:56"`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub timecode: Option<String>,
     /// Set on custom-catalog matches.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub audio_id: Option<i64>,
     /// Artist name on a public-catalog match.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub artist: Option<String>,
     /// Track title on a public-catalog match.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub title: Option<String>,
     /// Album name on a public-catalog match.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub album: Option<String>,
     /// Track release date.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub release_date: Option<String>,
     /// Record label.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub label: Option<String>,
     /// AudD-hosted song-link URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub song_link: Option<String>,
     /// ISRC (International Standard Recording Code). Available on Startup plan or higher.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub isrc: Option<String>,
     /// UPC (Universal Product Code) of the release. Available on Startup plan or higher.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub upc: Option<String>,
     /// Apple Music metadata if requested via `return=apple_music`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub apple_music: Option<AppleMusicMetadata>,
     /// Spotify metadata if requested via `return=spotify`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub spotify: Option<SpotifyMetadata>,
     /// Deezer metadata if requested via `return=deezer`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub deezer: Option<DeezerMetadata>,
     /// Napster metadata if requested via `return=napster`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub napster: Option<NapsterMetadata>,
     /// MusicBrainz matches if requested via `return=musicbrainz`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub musicbrainz: Option<Vec<MusicBrainzEntry>>,
     /// Forward-compat: any unknown fields the server returned.
     #[serde(flatten)]
@@ -510,43 +698,91 @@ impl RecognitionMatch {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct EnterpriseMatch {
     /// Match score (0–100). Absent on some enterprise matches.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub score: Option<i32>,
     /// Position in the source where the match starts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub timecode: Option<String>,
     /// Artist.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub artist: Option<String>,
     /// Title.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub title: Option<String>,
     /// Album.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub album: Option<String>,
     /// Release date.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub release_date: Option<String>,
     /// Label.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub label: Option<String>,
     /// ISRC.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub isrc: Option<String>,
     /// UPC of the album.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub upc: Option<String>,
     /// AudD-hosted song-link URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub song_link: Option<String>,
     /// Raw fragment-relative start offset, in milliseconds within the 12s
     /// fragment this match was found in. Use [`Self::start_seconds`] for the
     /// position in the user's file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub start_offset: Option<i64>,
     /// Raw fragment-relative end offset, in milliseconds within the 12s
     /// fragment. Use [`Self::end_seconds`] for the position in the user's file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub end_offset: Option<i64>,
     /// Where the match starts in the user's file, in seconds: the chunk's
     /// `offset` plus the fragment-relative `start_offset`. Computed by the SDK
@@ -624,12 +860,12 @@ impl EnterpriseMatch {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct EnterpriseChunkResult {
     /// Songs matched in this chunk.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_or_default")]
     pub songs: Vec<EnterpriseMatch>,
     /// Offset of this chunk in the source (e.g., `"00:00"`). This is the
     /// chunk's position in the user's file — the anchor for each song's
     /// file-relative seconds.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_or_default")]
     pub offset: String,
     /// Forward-compat.
     #[serde(flatten)]
@@ -660,16 +896,28 @@ impl EnterpriseChunkResult {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Stream {
     /// Caller-chosen integer ID for the stream.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub radio_id: Option<i64>,
     /// Source URL the stream is reading from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub url: Option<String>,
     /// Whether AudD is currently consuming and recognizing the stream.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_or_default")]
     pub stream_running: bool,
     /// Server-generated longpoll category for sharing with browser/widget consumers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub longpoll_category: Option<String>,
     /// Forward-compat.
     #[serde(flatten)]
@@ -686,46 +934,102 @@ pub struct Stream {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct StreamCallbackSong {
     /// Artist.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub artist: Option<String>,
     /// Title.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub title: Option<String>,
     /// Match score.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub score: Option<i32>,
     /// Album.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub album: Option<String>,
     /// Release date.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub release_date: Option<String>,
     /// Record label.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub label: Option<String>,
     /// AudD-hosted song-link URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub song_link: Option<String>,
     /// ISRC. Available on Startup plan or higher.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub isrc: Option<String>,
     /// UPC. Available on Startup plan or higher.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub upc: Option<String>,
     /// Apple Music metadata if requested.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub apple_music: Option<AppleMusicMetadata>,
     /// Spotify metadata if requested.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub spotify: Option<SpotifyMetadata>,
     /// Deezer metadata if requested.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub deezer: Option<DeezerMetadata>,
     /// Napster metadata if requested.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub napster: Option<NapsterMetadata>,
     /// MusicBrainz matches if requested.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub musicbrainz: Option<Vec<MusicBrainzEntry>>,
     /// Forward-compat.
     #[serde(flatten)]
@@ -774,21 +1078,41 @@ pub struct StreamCallbackMatch {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct StreamCallbackNotification {
     /// Stream the notification is for.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub radio_id: Option<i64>,
     /// Whether the stream is currently running.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub stream_running: Option<bool>,
     /// Numeric notification code.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub notification_code: Option<i32>,
     /// Human-readable notification text.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub notification_message: Option<String>,
     /// Outer-envelope `time` field (server-emitted unix-seconds), if present.
     /// Sibling of `notification` in the wire payload — hoisted here for
     /// convenience. Skipped on serialize when `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub time: Option<i64>,
     /// Forward-compat: unknown keys on the `notification` object.
     #[serde(flatten)]
@@ -936,28 +1260,60 @@ impl CallbackEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct LyricsResult {
     /// Artist name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub artist: Option<String>,
     /// Song title.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub title: Option<String>,
     /// Lyrics text, if AudD has them indexed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub lyrics: Option<String>,
     /// Internal song identifier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub song_id: Option<i64>,
     /// Embed/media URL when available.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub media: Option<String>,
     /// Server-rendered "Artist – Title" string.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub full_title: Option<String>,
     /// Internal artist identifier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub artist_id: Option<i64>,
     /// AudD-hosted song-link.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub song_link: Option<String>,
     /// Forward-compat.
     #[serde(flatten)]
@@ -1139,6 +1495,118 @@ mod tests {
         assert_eq!(offset_to_seconds(Some("")), None);
         assert_eq!(offset_to_seconds(Some("1:2:3:4")), None);
         assert_eq!(offset_to_seconds(None), None);
+    }
+
+    // ----- Lenient parsing: wrong-typed fields degrade instead of erroring -----
+
+    #[test]
+    fn recognition_tolerates_wrong_typed_fields() {
+        let v = json!({
+            "timecode": 56,
+            "audio_id": "146",
+            "artist": 42,
+            "title": "Y",
+            "album": "Z"
+        });
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.timecode, None);
+        assert_eq!(r.audio_id, None);
+        assert_eq!(r.artist, None);
+        assert_eq!(r.title.as_deref(), Some("Y"));
+        assert_eq!(r.album.as_deref(), Some("Z"));
+    }
+
+    #[test]
+    fn recognition_tolerates_wrong_typed_metadata_block() {
+        // apple_music as a string (not an object) must not fail the decode.
+        let v = json!({"artist": "X", "apple_music": "oops"});
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.apple_music, None);
+        assert_eq!(r.artist.as_deref(), Some("X"));
+    }
+
+    #[test]
+    fn recognition_tolerates_wrong_typed_nested_metadata_field() {
+        let v = json!({
+            "artist": "X",
+            "apple_music": {"artistName": "X", "durationInMillis": "180000"}
+        });
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        let am = r.apple_music.expect("block itself parses");
+        assert_eq!(am.artist_name.as_deref(), Some("X"));
+        assert_eq!(
+            am.duration_in_millis, None,
+            "wrong-typed nested field degrades"
+        );
+    }
+
+    #[test]
+    fn enterprise_match_tolerates_string_score_and_numeric_timecode() {
+        let v = json!({"score": "85", "timecode": 7, "artist": "A", "title": "T"});
+        let m: EnterpriseMatch = serde_json::from_value(v).unwrap();
+        assert_eq!(m.score, None);
+        assert_eq!(m.timecode, None);
+        assert_eq!(m.artist.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn stream_tolerates_wrong_typed_fields() {
+        let v = json!({"radio_id": "9", "url": "twitch:a", "stream_running": "true"});
+        let s: Stream = serde_json::from_value(v).unwrap();
+        assert_eq!(s.radio_id, None);
+        assert!(!s.stream_running);
+        assert_eq!(s.url.as_deref(), Some("twitch:a"));
+    }
+
+    #[test]
+    fn stream_callback_match_tolerates_wrong_typed_fields() {
+        let v = json!({
+            "radio_id": "7",
+            "timestamp": 12345,
+            "play_length": "220",
+            "results": [{"artist": "A", "title": "T", "score": "99"}]
+        });
+        let m: StreamCallbackMatch = serde_json::from_value(v).unwrap();
+        assert_eq!(m.radio_id, None);
+        assert_eq!(m.timestamp, None);
+        assert_eq!(m.play_length, None);
+        assert_eq!(m.song.artist.as_deref(), Some("A"));
+        assert_eq!(m.song.score, None, "string score degrades to None");
+    }
+
+    #[test]
+    fn stream_callback_notification_tolerates_wrong_typed_fields() {
+        let v = json!({
+            "radio_id": 3,
+            "stream_running": "false",
+            "notification_code": "650",
+            "notification_message": "can't connect"
+        });
+        let n: StreamCallbackNotification = serde_json::from_value(v).unwrap();
+        assert_eq!(n.radio_id, Some(3));
+        assert_eq!(n.stream_running, None);
+        assert_eq!(
+            n.notification_code, None,
+            "string notification_code degrades"
+        );
+        assert_eq!(n.notification_message.as_deref(), Some("can't connect"));
+    }
+
+    #[test]
+    fn lyrics_result_tolerates_wrong_typed_song_id() {
+        let v = json!({"artist": "A", "title": "T", "song_id": "abc"});
+        let l: LyricsResult = serde_json::from_value(v).unwrap();
+        assert_eq!(l.song_id, None);
+        assert_eq!(l.artist.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn enterprise_chunk_tolerates_wrong_typed_songs_and_offset() {
+        // A non-array `songs` / non-string `offset` degrade to defaults.
+        let v = json!({"songs": "oops", "offset": 12});
+        let c: EnterpriseChunkResult = serde_json::from_value(v).unwrap();
+        assert!(c.songs.is_empty());
+        assert_eq!(c.offset, "");
     }
 
     #[test]

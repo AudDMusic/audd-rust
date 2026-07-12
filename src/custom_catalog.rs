@@ -52,6 +52,7 @@ impl<'a> CustomCatalog<'a> {
         let policy = RetryPolicy::new(RetryClass::Mutating).with_max_attempts(1);
         let audio_id_s = audio_id.to_string();
 
+        let started = self.inner.emit_request("upload", &url);
         let resp = retry_async(
             || {
                 let reopen = &reopen;
@@ -67,7 +68,15 @@ impl<'a> CustomCatalog<'a> {
             },
             policy,
         )
-        .await?;
+        .await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                self.inner.emit_exception("upload", &url, started, &e);
+                return Err(e);
+            }
+        };
+        self.inner.emit_response("upload", &url, started, &resp);
         decode_or_raise(resp, /* custom_catalog_context = */ true)?;
         Ok(())
     }

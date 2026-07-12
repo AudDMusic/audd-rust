@@ -19,11 +19,34 @@ use crate::models::{
 };
 use crate::retry::{retry_async, RetryPolicy};
 
-/// Server returns error #19 from `getCallbackUrl` when no callback URL is
-/// configured. We treat this specifically as the "no-callback-set" signal.
+/// Server returns error #19 with an "Internal error" message from
+/// `getCallbackUrl` when no callback URL is configured. Code 19 also covers
+/// real conditions (maintenance, blocked requests), so the preflight only
+/// treats it as the no-callback signal when the message indicates it — see
+/// [`indicates_no_callback_url`].
 const NO_CALLBACK_ERROR_CODE: i32 = 19;
 
 const HTTP_CLIENT_ERROR_FLOOR: u16 = 400;
+
+/// Margin added on top of the poll timeout when sizing the per-request HTTP
+/// deadline for longpoll GETs.
+const LONGPOLL_TIMEOUT_MARGIN_SECS: u64 = 10;
+
+/// Size the HTTP deadline for one longpoll request: the server-side poll
+/// timeout plus a network margin, so poll timeouts above the standard 60s
+/// aren't cut short by the transport.
+pub(crate) fn longpoll_request_timeout(poll_timeout_secs: i64) -> std::time::Duration {
+    let secs = u64::try_from(poll_timeout_secs).unwrap_or(0);
+    std::time::Duration::from_secs(secs + LONGPOLL_TIMEOUT_MARGIN_SECS)
+}
+
+/// Reports whether a code-19 error message from `getCallbackUrl` is the
+/// no-callback-URL signal ("Internal error") rather than a real server
+/// condition (maintenance, blocked request, abuse, ...).
+fn indicates_no_callback_url(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("internal") || lower.contains("callback")
+}
 
 const PREFLIGHT_NO_CALLBACK_HINT: &str =
     "Longpoll won't deliver events because no callback URL is configured for this account. \
@@ -169,7 +192,8 @@ impl<'a> Streams<'a> {
         }
         fields.push(("url", url));
         post_form(
-            &self.inner.http,
+            self.inner,
+            "setCallbackUrl",
             &format!("{}/setCallbackUrl/", self.inner.api_base),
             &fields,
             self.inner.mutating_policy(),
@@ -180,20 +204,29 @@ impl<'a> Streams<'a> {
 
     /// Read the currently-configured callback URL.
     ///
+    /// Returns `Ok(None)` when the server reports success with a `null`
+    /// result (no URL value to return).
+    ///
     /// # Errors
     ///
     /// Returns [`AudDError::Api`] with code 19 if no callback URL is configured.
-    pub async fn get_callback_url(&self) -> Result<String, AudDError> {
+    pub async fn get_callback_url(&self) -> Result<Option<String>, AudDError> {
         let result = post_form(
-            &self.inner.http,
+            self.inner,
+            "getCallbackUrl",
             &format!("{}/getCallbackUrl/", self.inner.api_base),
             &[],
             self.inner.read_policy(),
         )
         .await?;
-        Ok(result
-            .as_str()
-            .map_or_else(|| result.to_string(), str::to_string))
+        if result.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(
+            result
+                .as_str()
+                .map_or_else(|| result.to_string(), str::to_string),
+        ))
     }
 
     /// Add a stream subscription.
@@ -226,7 +259,8 @@ impl<'a> Streams<'a> {
             fields.push(("callbacks", cb.to_string()));
         }
         post_form(
-            &self.inner.http,
+            self.inner,
+            "addStream",
             &format!("{}/addStream/", self.inner.api_base),
             &fields,
             self.inner.mutating_policy(),
@@ -242,7 +276,8 @@ impl<'a> Streams<'a> {
     /// Returns [`AudDError`] for transport/server failures.
     pub async fn set_url(&self, radio_id: i64, url: &str) -> Result<(), AudDError> {
         post_form(
-            &self.inner.http,
+            self.inner,
+            "setStreamUrl",
             &format!("{}/setStreamUrl/", self.inner.api_base),
             &[("radio_id", radio_id.to_string()), ("url", url.to_string())],
             self.inner.mutating_policy(),
@@ -258,7 +293,8 @@ impl<'a> Streams<'a> {
     /// Returns [`AudDError`] for transport/server failures.
     pub async fn delete(&self, radio_id: i64) -> Result<(), AudDError> {
         post_form(
-            &self.inner.http,
+            self.inner,
+            "deleteStream",
             &format!("{}/deleteStream/", self.inner.api_base),
             &[("radio_id", radio_id.to_string())],
             self.inner.mutating_policy(),
@@ -274,7 +310,8 @@ impl<'a> Streams<'a> {
     /// Returns [`AudDError`] for transport/server/parse failures.
     pub async fn list(&self) -> Result<Vec<StreamRow>, AudDError> {
         let result = post_form(
-            &self.inner.http,
+            self.inner,
+            "getStreams",
             &format!("{}/getStreams/", self.inner.api_base),
             &[],
             self.inner.read_policy(),
@@ -318,9 +355,10 @@ impl<'a> Streams<'a> {
     /// the consumer.
     ///
     /// On entry, performs a one-time `getCallbackUrl` preflight unless
-    /// `opts.skip_callback_check == true`. If the server returns error #19
-    /// (no callback URL configured), [`AudDError::Api`] is returned with kind
-    /// [`ErrorKind::InvalidRequest`] explaining how to fix it.
+    /// `opts.skip_callback_check == true`. If the server's response indicates
+    /// that no callback URL is configured, [`AudDError::Api`] is returned with
+    /// kind [`ErrorKind::InvalidRequest`] explaining how to fix it; any other
+    /// server error passes through unchanged.
     ///
     /// # Errors
     ///
@@ -365,27 +403,25 @@ impl<'a> Streams<'a> {
     async fn preflight_callback(&self) -> Result<(), AudDError> {
         match self.get_callback_url().await {
             Ok(_) => Ok(()),
-            Err(e) if e.error_code() == Some(NO_CALLBACK_ERROR_CODE) => {
-                let (http_status, request_id) = match &e {
-                    AudDError::Api {
-                        http_status,
-                        request_id,
-                        ..
-                    } => (*http_status, request_id.clone()),
-                    _ => (0, None),
-                };
-                Err(AudDError::Api {
-                    code: 0,
-                    message: PREFLIGHT_NO_CALLBACK_HINT.to_string(),
-                    kind: ErrorKind::InvalidRequest,
-                    http_status,
-                    request_id,
-                    requested_params: std::collections::HashMap::new(),
-                    request_method: None,
-                    branded_message: None,
-                    raw_response: Value::Null,
-                })
-            }
+            Err(AudDError::Api {
+                code: NO_CALLBACK_ERROR_CODE,
+                message,
+                http_status,
+                request_id,
+                ..
+            }) if indicates_no_callback_url(&message) => Err(AudDError::Api {
+                code: 0,
+                message: PREFLIGHT_NO_CALLBACK_HINT.to_string(),
+                kind: ErrorKind::InvalidRequest,
+                http_status,
+                request_id,
+                requested_params: std::collections::HashMap::new(),
+                request_method: None,
+                branded_message: None,
+                raw_response: Value::Null,
+            }),
+            // Any other error — including a #19 whose message indicates a real
+            // server condition (maintenance, blocked, ...) — passes through.
             Err(other) => Err(other),
         }
     }
@@ -436,6 +472,10 @@ impl LongpollDriver {
         &self,
         params: &[(&str, String)],
     ) -> Result<crate::http::HttpResponse, AudDError> {
+        // Size each longpoll request's HTTP deadline to the poll timeout plus
+        // a margin, so poll timeouts above the transport's default budget
+        // aren't cut short mid-poll.
+        let request_timeout = longpoll_request_timeout(self.timeout());
         match self {
             Self::Authenticated {
                 http, url, policy, ..
@@ -450,7 +490,7 @@ impl LongpollDriver {
                         let http = http.clone();
                         let url = url.clone();
                         let params = params.clone();
-                        async move { http.get(&url, &params, None).await }
+                        async move { http.get(&url, &params, Some(request_timeout)).await }
                     },
                     policy,
                 )
@@ -469,7 +509,7 @@ impl LongpollDriver {
                         let http = http.clone();
                         let url = url.clone();
                         let params = params.clone();
-                        async move { http.get(&url, &params).await }
+                        async move { http.get(&url, &params, Some(request_timeout)).await }
                     },
                     policy,
                 )
@@ -630,15 +670,19 @@ pub(crate) fn is_longpoll_keepalive(body: &Value) -> bool {
 }
 
 /// Internal — POST a form body to a streams-namespace endpoint and return the
-/// `result` field on success.
+/// `result` field on success. Emits request/response/exception lifecycle
+/// events for the registered `on_event` hook.
 async fn post_form(
-    http: &HttpClient,
+    inner: &AudDInner,
+    method: &str,
     url: &str,
     fields: &[(&str, String)],
     policy: RetryPolicy,
 ) -> Result<Value, AudDError> {
+    let http = &inner.http;
     let url = url.to_string();
     let fields: Vec<(&str, String)> = fields.iter().map(|(k, v)| (*k, v.clone())).collect();
+    let started = inner.emit_request(method, &url);
     let resp = retry_async(
         || {
             let http = http.clone();
@@ -648,7 +692,15 @@ async fn post_form(
         },
         policy,
     )
-    .await?;
+    .await;
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            inner.emit_exception(method, &url, started, &e);
+            return Err(e);
+        }
+    };
+    inner.emit_response(method, &url, started, &resp);
     let body = decode_or_raise(resp, false)?;
     Ok(body.get("result").cloned().unwrap_or(Value::Null))
 }
@@ -673,6 +725,33 @@ mod tests {
         assert_eq!(o.timeout, 30);
         assert_eq!(o.since_time, Some(123));
         assert!(o.skip_callback_check);
+    }
+
+    #[test]
+    fn longpoll_request_timeout_sizes_above_poll_timeout() {
+        assert_eq!(
+            longpoll_request_timeout(50),
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(
+            longpoll_request_timeout(300),
+            std::time::Duration::from_secs(310)
+        );
+        // Negative (invalid) timeouts degrade to just the margin.
+        assert_eq!(
+            longpoll_request_timeout(-1),
+            std::time::Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn no_callback_url_signal_detection() {
+        assert!(indicates_no_callback_url("Internal error"));
+        assert!(indicates_no_callback_url("no callback url set"));
+        assert!(!indicates_no_callback_url(
+            "Scheduled maintenance, try again later"
+        ));
+        assert!(!indicates_no_callback_url("request blocked"));
     }
 
     #[test]

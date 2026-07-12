@@ -31,8 +31,9 @@ pub fn derive_longpoll_category(api_token: &str, radio_id: i64) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`AudDError::Serialization`] if the body isn't valid JSON, doesn't
-/// match either shape, or has an empty `result.results` array.
+/// Returns [`AudDError::Serialization`] if the body isn't valid JSON or
+/// doesn't match either shape. An empty `result.results` array is tolerated:
+/// the match parses with a default (empty) song.
 pub fn handle_callback(body: impl AsRef<[u8]>) -> Result<CallbackEvent, AudDError> {
     let bytes = body.as_ref();
     let value: Value = serde_json::from_slice(bytes).map_err(|e| AudDError::Serialization {

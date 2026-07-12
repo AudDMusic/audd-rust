@@ -205,18 +205,17 @@ impl BareHttpClient {
         &self,
         url: &str,
         query: &[(&str, String)],
+        per_call_timeout: Option<Duration>,
     ) -> Result<HttpResponse, AudDError> {
         let q: Vec<(String, String)> = query
             .iter()
             .map(|(k, v)| ((*k).to_string(), v.clone()))
             .collect();
-        let resp = self
-            .inner
-            .get(url)
-            .query(&q)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+        let mut req = self.inner.get(url).query(&q);
+        if let Some(t) = per_call_timeout {
+            req = req.timeout(t);
+        }
+        let resp = req.send().await.map_err(map_reqwest_error)?;
         wrap(resp).await
     }
 }

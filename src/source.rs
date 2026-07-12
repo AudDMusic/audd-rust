@@ -1,4 +1,4 @@
-//! Source enum + per-attempt re-opener pattern (locked C1).
+//! Source enum + per-attempt re-opener pattern.
 //!
 //! `reqwest::multipart::Form` parts implement `Clone` for byte buffers but NOT
 //! for streams; `reqwest` itself does NOT auto-rewind body streams across

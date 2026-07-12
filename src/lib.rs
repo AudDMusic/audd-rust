@@ -13,9 +13,8 @@
 //! ```
 //!
 //! Use [`AudD::builder`] to configure retries, timeouts, or a custom
-//! [`reqwest::Client`]. See the README for a full capability tour and the
-//! [audd-openapi](https://github.com/AudDMusic/audd-openapi) repository for the
-//! canonical API contract.
+//! [`reqwest::Client`]. See the README for a full capability tour and
+//! <https://docs.audd.io> for the API reference.
 
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]

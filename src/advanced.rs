@@ -61,7 +61,8 @@ impl<'a> Advanced<'a> {
         let url = format!("{}/{method}/", self.inner.api_base);
         let http = self.inner.http.clone();
         let fields: Vec<(&str, String)> = params.iter().map(|(k, v)| (*k, v.clone())).collect();
-        let resp: HttpResponse = retry_async(
+        let started = self.inner.emit_request(method, &url);
+        let resp: HttpResponse = match retry_async(
             || {
                 let http = http.clone();
                 let url = url.clone();
@@ -70,7 +71,15 @@ impl<'a> Advanced<'a> {
             },
             self.inner.recognition_policy(),
         )
-        .await?;
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                self.inner.emit_exception(method, &url, started, &e);
+                return Err(e);
+            }
+        };
+        self.inner.emit_response(method, &url, started, &resp);
         // For raw_request we still distinguish HTTP-vs-JSON; but we don't unwrap to result,
         // we hand the body back to the caller (or let decode_or_raise map an error).
         let HttpResponse {

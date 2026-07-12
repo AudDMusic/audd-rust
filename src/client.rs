@@ -169,6 +169,62 @@ impl AudDInner {
         let _ = std::panic::catch_unwind(AssertUnwindSafe(|| hook(event)));
     }
 
+    /// Emit the [`EventKind::Request`] event for a call and return its start
+    /// instant for the matching completion event.
+    pub(crate) fn emit_request(&self, method: &str, url: &str) -> Instant {
+        self.emit_event(&AudDEvent {
+            kind: EventKind::Request,
+            method: method.to_string(),
+            url: url.to_string(),
+            request_id: None,
+            http_status: None,
+            elapsed: Duration::from_secs(0),
+            error_code: None,
+            extras: HashMap::new(),
+        });
+        Instant::now()
+    }
+
+    /// Emit the [`EventKind::Response`] completion event for a call.
+    pub(crate) fn emit_response(
+        &self,
+        method: &str,
+        url: &str,
+        started: Instant,
+        resp: &crate::http::HttpResponse,
+    ) {
+        self.emit_event(&AudDEvent {
+            kind: EventKind::Response,
+            method: method.to_string(),
+            url: url.to_string(),
+            request_id: resp.request_id.clone(),
+            http_status: Some(resp.http_status),
+            elapsed: started.elapsed(),
+            error_code: None,
+            extras: HashMap::new(),
+        });
+    }
+
+    /// Emit the [`EventKind::Exception`] completion event for a call.
+    pub(crate) fn emit_exception(
+        &self,
+        method: &str,
+        url: &str,
+        started: Instant,
+        error: &AudDError,
+    ) {
+        self.emit_event(&AudDEvent {
+            kind: EventKind::Exception,
+            method: method.to_string(),
+            url: url.to_string(),
+            request_id: error.request_id().map(str::to_string),
+            http_status: None,
+            elapsed: started.elapsed(),
+            error_code: error.error_code(),
+            extras: HashMap::new(),
+        });
+    }
+
     pub(crate) fn read_policy(&self) -> RetryPolicy {
         RetryPolicy::new(RetryClass::Read)
             .with_max_attempts(self.max_attempts)
@@ -276,14 +332,15 @@ impl AudDBuilder {
     }
 
     /// Register an inspection hook that receives request / response /
-    /// exception lifecycle events. The hook is invoked synchronously inside
+    /// exception lifecycle events for every API call — recognition,
+    /// enterprise recognition, stream management, custom-catalog uploads, and
+    /// `advanced` requests. The hook is invoked synchronously inside
     /// the request future; **panics raised by the hook are caught and
     /// suppressed** so observability never breaks the request path.
     ///
     /// Events never carry the `api_token` or request / response body bytes —
     /// hook authors who want body access should layer their own
-    /// `reqwest::Client` and inject it via [`Self::reqwest_client`]. See spec
-    /// §7.7a.
+    /// `reqwest::Client` and inject it via [`Self::reqwest_client`].
     ///
     /// ```no_run
     /// # use std::sync::Arc;
