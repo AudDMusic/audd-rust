@@ -68,30 +68,99 @@ const ALL_STREAMING_PROVIDERS: [StreamingProvider; 5] = [
     StreamingProvider::YouTube,
 ];
 
-/// Deserialize a response field best-effort: absent, `null`, or wrong-typed
-/// values all yield `None` instead of failing the whole response decode.
+/// Deserialize a response field best-effort: absent and `null` yield `None`;
+/// a wrong-typed value is coerced when convertible (see
+/// [`coercion_candidates`]) and yields `None` otherwise — the whole response
+/// decode never fails on one field.
 ///
 /// A successful response must never fail to parse because one field arrived
-/// with an unexpected type (e.g. a string `"score"` or a numeric `timecode`);
-/// the affected field degrades to `None` and everything else populates.
+/// with an unexpected type (e.g. a string `"score"` or a numeric `timecode`).
 fn lenient_opt<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::de::DeserializeOwned,
 {
     let v = Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(v).ok())
+    Ok(lenient_from_value(v))
 }
 
-/// Like [`lenient_opt`] for non-`Option` fields: a wrong-typed value degrades
-/// to the type's default instead of failing the whole response decode.
+/// Like [`lenient_opt`] for non-`Option` fields: an unconvertible wrong-typed
+/// value degrades to the type's default instead of failing the decode.
 fn lenient_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::de::DeserializeOwned + Default,
 {
     let v = Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(v).unwrap_or_default())
+    Ok(lenient_from_value(v).unwrap_or_default())
+}
+
+/// Decode `v` into `T`, coercing convertible mismatched scalars.
+pub(crate) fn lenient_from_value<T: serde::de::DeserializeOwned>(v: Value) -> Option<T> {
+    match serde_json::from_value::<T>(v.clone()) {
+        Ok(t) => Some(t),
+        Err(_) => coercion_candidates(&v)
+            .into_iter()
+            .find_map(|c| serde_json::from_value::<T>(c).ok()),
+    }
+}
+
+/// Coerced alternatives for a mismatched scalar wire value, tried in order:
+///
+/// * string → strictly-parsed number (whole trimmed string, finite; floats
+///   also offer a truncated integer) or a recognized boolean
+///   ("true"/"1"/"yes"/"on" and "false"/"0"/"no"/"off"/"", case-insensitive).
+/// * number → truncated integer (for non-integral floats), `!= 0` bool, and
+///   its string rendering ("85", "8.5").
+/// * bool → 0/1 and "true"/"false".
+///
+/// Wrong-shaped containers (objects/arrays where a scalar is expected, and
+/// vice versa) get no candidates — those fields degrade.
+fn coercion_candidates(v: &Value) -> Vec<Value> {
+    match v {
+        Value::String(s) => {
+            let t = s.trim();
+            let mut out = Vec::new();
+            if let Ok(i) = t.parse::<i64>() {
+                out.push(Value::from(i));
+            } else if let Ok(f) = t.parse::<f64>() {
+                if f.is_finite() {
+                    out.push(Value::from(f));
+                    // Intentional truncation: "8.5" into an integer field → 8.
+                    #[allow(clippy::cast_possible_truncation)]
+                    out.push(Value::from(f.trunc() as i64));
+                }
+            }
+            if let Some(b) = bool_from_str(t) {
+                out.push(Value::Bool(b));
+            }
+            out
+        }
+        Value::Number(n) => {
+            let mut out = Vec::new();
+            if let Some(f) = n.as_f64() {
+                if n.as_i64().is_none() && n.as_u64().is_none() && f.is_finite() {
+                    // Intentional truncation: 8.5 into an integer field → 8.
+                    #[allow(clippy::cast_possible_truncation)]
+                    out.push(Value::from(f.trunc() as i64));
+                }
+                out.push(Value::Bool(f != 0.0));
+            }
+            out.push(Value::String(n.to_string()));
+            out
+        }
+        Value::Bool(b) => vec![Value::from(i64::from(*b)), Value::String(b.to_string())],
+        _ => Vec::new(),
+    }
+}
+
+/// Recognized boolean strings; anything else is not coerced into a bool.
+fn bool_from_str(t: &str) -> Option<bool> {
+    match t.to_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" | "" => Some(false),
+        _ => None,
+    }
 }
 
 /// Build `"<song_link>?<provider>"` only when `song_link.host_str() == "lis.tn"`.
@@ -1136,19 +1205,19 @@ impl<'de> Deserialize<'de> for StreamCallbackMatch {
 
         // A successful response must never fail to parse on a missing or
         // wrong-typed field. `radio_id` / `timestamp` / `play_length` decode
-        // leniently: absent, null, or an unexpected type all yield `None`
-        // rather than a hard error.
+        // leniently: absent and null yield `None`; an unexpected type is
+        // coerced when convertible and yields `None` otherwise.
         let radio_id = match map.remove("radio_id") {
-            Some(v) => serde_json::from_value(v).ok(),
+            Some(v) => lenient_from_value(v),
             None => None,
         };
         let timestamp = match map.remove("timestamp") {
             Some(Value::Null) | None => None,
-            Some(v) => serde_json::from_value(v).ok(),
+            Some(v) => lenient_from_value(v),
         };
         let play_length = match map.remove("play_length") {
             Some(Value::Null) | None => None,
-            Some(v) => serde_json::from_value(v).ok(),
+            Some(v) => lenient_from_value(v),
         };
         let results: Vec<StreamCallbackSong> = match map.remove("results") {
             // A missing or non-array `results` deserializes to an empty Vec
@@ -1500,7 +1569,7 @@ mod tests {
     // ----- Lenient parsing: wrong-typed fields degrade instead of erroring -----
 
     #[test]
-    fn recognition_tolerates_wrong_typed_fields() {
+    fn recognition_coerces_convertible_wrong_typed_fields() {
         let v = json!({
             "timecode": 56,
             "audio_id": "146",
@@ -1509,11 +1578,71 @@ mod tests {
             "album": "Z"
         });
         let r: RecognitionResult = serde_json::from_value(v).unwrap();
-        assert_eq!(r.timecode, None);
-        assert_eq!(r.audio_id, None);
-        assert_eq!(r.artist, None);
+        assert_eq!(
+            r.timecode.as_deref(),
+            Some("56"),
+            "number renders to string"
+        );
+        assert_eq!(r.audio_id, Some(146), "numeric string parses");
+        assert_eq!(r.artist.as_deref(), Some("42"));
         assert_eq!(r.title.as_deref(), Some("Y"));
         assert_eq!(r.album.as_deref(), Some("Z"));
+    }
+
+    #[test]
+    fn recognition_unconvertible_fields_degrade() {
+        // Garbage that can't be coerced degrades to None — never an error,
+        // never a misleading zero from a partial parse.
+        let v = json!({
+            "audio_id": "abc",
+            "timecode": {"x": 1},
+            "artist": ["A"],
+            "title": "Y"
+        });
+        let r: RecognitionResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.audio_id, None, "non-numeric string does not coerce");
+        assert_eq!(r.timecode, None, "object does not coerce to string");
+        assert_eq!(r.artist, None, "array does not coerce to string");
+        assert_eq!(r.title.as_deref(), Some("Y"));
+    }
+
+    #[test]
+    fn scalar_coercion_matrix() {
+        for (body, want_score) in [
+            (json!({"score": 85.9}), Some(85)),   // float truncates
+            (json!({"score": "8.5"}), Some(8)),   // float-string truncates
+            (json!({"score": " 85 "}), Some(85)), // trimmed numeric string
+            (json!({"score": true}), Some(1)),    // bool maps to 1
+            (json!({"score": "85abc"}), None),    // no partial parses
+            (json!({"score": "NaN"}), None),      // non-finite degrades
+            (json!({"score": "Infinity"}), None), // non-finite degrades
+        ] {
+            let m: EnterpriseMatch = serde_json::from_value(body.clone()).unwrap();
+            assert_eq!(m.score, want_score, "body: {body}");
+        }
+    }
+
+    #[test]
+    fn bool_coercion_whitelist() {
+        for (raw, want) in [
+            (json!("true"), true),
+            (json!("1"), true),
+            (json!("YES"), true),
+            (json!("on"), true),
+            (json!(1), true),
+            (json!("false"), false),
+            (json!("0"), false),
+            (json!("No"), false),
+            (json!("off"), false),
+            (json!(""), false),
+            (json!(0), false),
+        ] {
+            let s: Stream = serde_json::from_value(json!({"stream_running": raw})).unwrap();
+            assert_eq!(s.stream_running, want, "stream_running={raw}");
+        }
+        // Unrecognized strings degrade to the default, never guess true.
+        let s: Stream = serde_json::from_value(json!({"stream_running": "maybe"})).unwrap();
+        assert!(!s.stream_running);
     }
 
     #[test]
@@ -1526,7 +1655,7 @@ mod tests {
     }
 
     #[test]
-    fn recognition_tolerates_wrong_typed_nested_metadata_field() {
+    fn recognition_coerces_wrong_typed_nested_metadata_field() {
         let v = json!({
             "artist": "X",
             "apple_music": {"artistName": "X", "durationInMillis": "180000"}
@@ -1535,31 +1664,32 @@ mod tests {
         let am = r.apple_music.expect("block itself parses");
         assert_eq!(am.artist_name.as_deref(), Some("X"));
         assert_eq!(
-            am.duration_in_millis, None,
-            "wrong-typed nested field degrades"
+            am.duration_in_millis,
+            Some(180_000),
+            "numeric-string nested field coerces"
         );
     }
 
     #[test]
-    fn enterprise_match_tolerates_string_score_and_numeric_timecode() {
+    fn enterprise_match_coerces_string_score_and_numeric_timecode() {
         let v = json!({"score": "85", "timecode": 7, "artist": "A", "title": "T"});
         let m: EnterpriseMatch = serde_json::from_value(v).unwrap();
-        assert_eq!(m.score, None);
-        assert_eq!(m.timecode, None);
+        assert_eq!(m.score, Some(85), "string score parses");
+        assert_eq!(m.timecode.as_deref(), Some("7"), "numeric timecode renders");
         assert_eq!(m.artist.as_deref(), Some("A"));
     }
 
     #[test]
-    fn stream_tolerates_wrong_typed_fields() {
+    fn stream_coerces_wrong_typed_fields() {
         let v = json!({"radio_id": "9", "url": "twitch:a", "stream_running": "true"});
         let s: Stream = serde_json::from_value(v).unwrap();
-        assert_eq!(s.radio_id, None);
-        assert!(!s.stream_running);
+        assert_eq!(s.radio_id, Some(9), "numeric-string radio_id parses");
+        assert!(s.stream_running, "\"true\" coerces to true");
         assert_eq!(s.url.as_deref(), Some("twitch:a"));
     }
 
     #[test]
-    fn stream_callback_match_tolerates_wrong_typed_fields() {
+    fn stream_callback_match_coerces_wrong_typed_fields() {
         let v = json!({
             "radio_id": "7",
             "timestamp": 12345,
@@ -1567,15 +1697,19 @@ mod tests {
             "results": [{"artist": "A", "title": "T", "score": "99"}]
         });
         let m: StreamCallbackMatch = serde_json::from_value(v).unwrap();
-        assert_eq!(m.radio_id, None);
-        assert_eq!(m.timestamp, None);
-        assert_eq!(m.play_length, None);
+        assert_eq!(m.radio_id, Some(7), "numeric-string radio_id parses");
+        assert_eq!(
+            m.timestamp.as_deref(),
+            Some("12345"),
+            "number renders to string"
+        );
+        assert_eq!(m.play_length, Some(220));
         assert_eq!(m.song.artist.as_deref(), Some("A"));
-        assert_eq!(m.song.score, None, "string score degrades to None");
+        assert_eq!(m.song.score, Some(99), "string score parses");
     }
 
     #[test]
-    fn stream_callback_notification_tolerates_wrong_typed_fields() {
+    fn stream_callback_notification_coerces_wrong_typed_fields() {
         let v = json!({
             "radio_id": 3,
             "stream_running": "false",
@@ -1584,29 +1718,35 @@ mod tests {
         });
         let n: StreamCallbackNotification = serde_json::from_value(v).unwrap();
         assert_eq!(n.radio_id, Some(3));
-        assert_eq!(n.stream_running, None);
+        assert_eq!(n.stream_running, Some(false), "\"false\" coerces");
         assert_eq!(
-            n.notification_code, None,
-            "string notification_code degrades"
+            n.notification_code,
+            Some(650),
+            "string notification_code parses"
         );
         assert_eq!(n.notification_message.as_deref(), Some("can't connect"));
     }
 
     #[test]
-    fn lyrics_result_tolerates_wrong_typed_song_id() {
+    fn lyrics_result_wrong_typed_song_id_degrades() {
         let v = json!({"artist": "A", "title": "T", "song_id": "abc"});
         let l: LyricsResult = serde_json::from_value(v).unwrap();
-        assert_eq!(l.song_id, None);
+        assert_eq!(l.song_id, None, "non-numeric string degrades");
         assert_eq!(l.artist.as_deref(), Some("A"));
     }
 
     #[test]
     fn enterprise_chunk_tolerates_wrong_typed_songs_and_offset() {
-        // A non-array `songs` / non-string `offset` degrade to defaults.
+        // A non-array `songs` degrades to empty; a numeric `offset` coerces
+        // to its string rendering; an unconvertible offset degrades.
         let v = json!({"songs": "oops", "offset": 12});
         let c: EnterpriseChunkResult = serde_json::from_value(v).unwrap();
         assert!(c.songs.is_empty());
-        assert_eq!(c.offset, "");
+        assert_eq!(c.offset, "12", "numeric offset renders to string");
+
+        let v = json!({"songs": [], "offset": {"x": 1}});
+        let c: EnterpriseChunkResult = serde_json::from_value(v).unwrap();
+        assert_eq!(c.offset, "", "wrong-shaped offset degrades");
     }
 
     #[test]

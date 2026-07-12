@@ -719,7 +719,7 @@ async fn streams_longpoll_category_string_form_still_works() {
 #[tokio::test]
 async fn recognize_tolerates_wrong_typed_fields() {
     // Numeric `timecode` + string `audio_id` must not fail the call; the
-    // wrong-typed fields degrade to None while the rest populates.
+    // wrong-typed fields coerce to the declared types.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
@@ -743,8 +743,12 @@ async fn recognize_tolerates_wrong_typed_fields() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(r.timecode, None);
-    assert_eq!(r.audio_id, None);
+    assert_eq!(
+        r.timecode.as_deref(),
+        Some("56"),
+        "numeric timecode renders"
+    );
+    assert_eq!(r.audio_id, Some(146), "numeric-string audio_id parses");
     assert_eq!(r.artist.as_deref(), Some("X"));
 }
 
@@ -771,8 +775,12 @@ async fn recognize_enterprise_tolerates_string_score() {
         .await
         .unwrap();
     assert_eq!(v.len(), 1);
-    assert_eq!(v[0].score, None, "string score degrades to None");
-    assert_eq!(v[0].timecode, None, "numeric timecode degrades to None");
+    assert_eq!(v[0].score, Some(85), "string score parses to 85");
+    assert_eq!(
+        v[0].timecode.as_deref(),
+        Some("7"),
+        "numeric timecode renders"
+    );
     assert_eq!(v[0].artist.as_deref(), Some("A"));
 }
 
@@ -793,11 +801,8 @@ async fn streams_list_tolerates_wrong_typed_fields() {
         .unwrap();
     let v = audd.streams().list().await.unwrap();
     assert_eq!(v.len(), 1);
-    assert_eq!(v[0].radio_id, None, "string radio_id degrades to None");
-    assert!(
-        !v[0].stream_running,
-        "string stream_running degrades to false"
-    );
+    assert_eq!(v[0].radio_id, Some(9), "numeric-string radio_id parses");
+    assert!(v[0].stream_running, "\"true\" coerces to true");
     assert_eq!(v[0].url.as_deref(), Some("twitch:a"));
 }
 
