@@ -134,7 +134,7 @@ if let Some(sp) = r.spotify.as_ref() {
 # Ok(()) }
 ```
 
-Valid `return_metadata` values: `apple_music`, `spotify`, `deezer`, `musicbrainz`. The corresponding fields (`r.apple_music`, `r.spotify`, `r.deezer`, `r.napster`, `r.musicbrainz`) are `None` when not requested.
+Valid `return_metadata` values: `apple_music`, `spotify`, `deezer`, `musicbrainz`. The corresponding fields (`r.apple_music`, `r.spotify`, `r.deezer`, `r.musicbrainz`) are `None` when not requested.
 
 For additional form fields the typed options don't cover — every options struct (`RecognizeOptions`, `EnterpriseOptions`) carries an `extra_parameters: Option<&HashMap<String, String>>` field. Typed fields win on collision.
 
