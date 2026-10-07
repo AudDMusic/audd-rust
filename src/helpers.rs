@@ -199,7 +199,7 @@ mod tests {
         let m = ev.as_match().expect("should be a match");
         assert_eq!(m.radio_id, Some(7));
         assert_eq!(m.song.title.as_deref(), Some("Y"));
-        assert!(m.alternatives.is_empty());
+        assert_eq!(m.alternatives.len(), 0);
     }
 
     #[test]

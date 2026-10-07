@@ -1513,7 +1513,7 @@ mod tests {
         let m: StreamCallbackMatch = serde_json::from_value(v).unwrap();
         assert_eq!(m.radio_id, Some(1));
         assert_eq!(m.song, StreamCallbackSong::default());
-        assert!(m.alternatives.is_empty());
+        assert_eq!(m.alternatives.len(), 0);
     }
 
     #[test]
@@ -1741,7 +1741,7 @@ mod tests {
         // to its string rendering; an unconvertible offset degrades.
         let v = json!({"songs": "oops", "offset": 12});
         let c: EnterpriseChunkResult = serde_json::from_value(v).unwrap();
-        assert!(c.songs.is_empty());
+        assert_eq!(c.songs.len(), 0);
         assert_eq!(c.offset, "12", "numeric offset renders to string");
 
         let v = json!({"songs": [], "offset": {"x": 1}});
