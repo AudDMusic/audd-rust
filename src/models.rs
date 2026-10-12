@@ -764,6 +764,10 @@ impl RecognitionMatch {
 }
 
 /// One match in an enterprise-recognition response.
+///
+/// Public-catalog matches set `artist`/`title`/etc.; custom-catalog matches set
+/// `audio_id` instead. Use [`Self::is_custom_match`] / [`Self::is_public_match`]
+/// to discriminate.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct EnterpriseMatch {
     /// Match score (0–100). Absent on some enterprise matches.
@@ -780,6 +784,13 @@ pub struct EnterpriseMatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub timecode: Option<String>,
+    /// Set on custom-catalog matches: the `audio_id` the track was added under.
+    #[serde(
+        default,
+        deserialize_with = "lenient_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub audio_id: Option<i64>,
     /// Artist.
     #[serde(
         default,
@@ -895,6 +906,18 @@ fn offset_to_seconds(o: Option<&str>) -> Option<f64> {
 }
 
 impl EnterpriseMatch {
+    /// `true` when `audio_id` is set (custom-catalog match).
+    #[must_use]
+    pub fn is_custom_match(&self) -> bool {
+        self.audio_id.is_some()
+    }
+
+    /// `true` when `artist` or `title` is set (public-catalog match).
+    #[must_use]
+    pub fn is_public_match(&self) -> bool {
+        self.audio_id.is_none() && (self.artist.is_some() || self.title.is_some())
+    }
+
     /// Cover-art URL for `lis.tn`-hosted song-links, else `None`.
     #[must_use]
     pub fn thumbnail_url(&self) -> Option<String> {
@@ -1747,6 +1770,45 @@ mod tests {
         let v = json!({"songs": [], "offset": {"x": 1}});
         let c: EnterpriseChunkResult = serde_json::from_value(v).unwrap();
         assert_eq!(c.offset, "", "wrong-shaped offset degrades");
+    }
+
+    #[test]
+    fn enterprise_custom_match_audio_id() {
+        let v = json!({
+            "score": 100,
+            "timecode": "01:45",
+            "audio_id": 146,
+            "start_offset": 0,
+            "end_offset": 11960
+        });
+        let m: EnterpriseMatch = serde_json::from_value(v).unwrap();
+        assert_eq!(m.audio_id, Some(146));
+        assert!(m.is_custom_match());
+        assert!(!m.is_public_match());
+        assert!(!m.extras.contains_key("audio_id"));
+    }
+
+    #[test]
+    fn enterprise_public_match_has_no_audio_id() {
+        let v = json!({"score": 100, "timecode": "00:56", "artist": "X", "title": "Y"});
+        let m: EnterpriseMatch = serde_json::from_value(v).unwrap();
+        assert_eq!(m.audio_id, None);
+        assert!(!m.is_custom_match());
+        assert!(m.is_public_match());
+    }
+
+    #[test]
+    fn enterprise_audio_id_lenient() {
+        let m: EnterpriseMatch =
+            serde_json::from_value(json!({"timecode": "01:45", "audio_id": "146"})).unwrap();
+        assert_eq!(m.audio_id, Some(146), "numeric string parses");
+        assert!(m.is_custom_match());
+
+        let g: EnterpriseMatch =
+            serde_json::from_value(json!({"audio_id": "abc", "artist": "A"})).unwrap();
+        assert_eq!(g.audio_id, None, "non-numeric string does not coerce");
+        assert!(!g.is_custom_match());
+        assert_eq!(g.artist.as_deref(), Some("A"));
     }
 
     #[test]

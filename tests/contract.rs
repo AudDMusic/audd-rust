@@ -86,6 +86,33 @@ fn enterprise_with_isrc_upc() {
 }
 
 #[test]
+fn enterprise_custom_match() {
+    let payload = load_or_skip!("enterprise_custom_match.json");
+    assert_eq!(payload["status"], "success");
+    let chunks: Vec<EnterpriseChunkResult> =
+        serde_json::from_value(payload["result"].clone()).unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].songs.len(), 1);
+    let s = &chunks[0].songs[0];
+    assert_eq!(s.audio_id, Some(146));
+    assert!(s.is_custom_match());
+    assert!(!s.is_public_match());
+    assert!(s.artist.is_none());
+    assert!(!s.extras.contains_key("audio_id"));
+}
+
+#[test]
+fn enterprise_public_match_has_no_audio_id() {
+    let payload = load_or_skip!("enterprise_with_isrc_upc.json");
+    let chunks: Vec<EnterpriseChunkResult> =
+        serde_json::from_value(payload["result"].clone()).unwrap();
+    let s = &chunks[0].songs[0];
+    assert_eq!(s.audio_id, None);
+    assert!(!s.is_custom_match());
+    assert!(s.is_public_match());
+}
+
+#[test]
 fn callback_with_result() {
     let payload = load_or_skip!("streams_callback_with_result.json");
     let ev = parse_callback(payload).unwrap();
