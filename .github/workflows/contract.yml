@@ -10,6 +10,10 @@ on:
   repository_dispatch:
     types: [openapi-updated]
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   contract:
     name: validate parser against latest audd-openapi fixtures
