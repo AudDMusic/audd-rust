@@ -2,12 +2,16 @@
 //! `audd-openapi/fixtures/`. Mirrors `audd-python/tests/contract/`.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use audd::{
     errors::raise_from_error_response_for_test, parse_callback, EnterpriseChunkResult,
-    RecognitionResult,
+    LongpollConsumer, LongpollIterateOptions, RecognitionResult,
 };
-use serde_json::Value;
+use futures_util::{FutureExt, StreamExt};
+use serde_json::{json, Value};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn fixtures_dir() -> Option<PathBuf> {
     if let Ok(env) = std::env::var("AUDD_OPENAPI_FIXTURES") {
@@ -140,6 +144,119 @@ fn longpoll_no_events() {
     let payload = load_or_skip!("longpoll_no_events.json");
     assert!(payload.get("timeout").is_some());
     assert!(payload.get("timestamp").is_some());
+}
+
+/// Serve `first` to the first longpoll request and `then` to every later one
+/// through a tokenless consumer; return the poll handle and the mock server.
+async fn longpoll_against(first: &Value, then: &Value) -> (audd::LongpollPoll, MockServer) {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/longpoll/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(first))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/longpoll/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(then))
+        .mount(&server)
+        .await;
+    let poll = LongpollConsumer::builder("abc123def")
+        .base_url(format!("{}/longpoll/", server.uri()))
+        .max_attempts(1)
+        .build()
+        .unwrap()
+        .iterate(LongpollIterateOptions {
+            timeout: 1,
+            ..Default::default()
+        });
+    (poll, server)
+}
+
+/// `since_time` of the second longpoll request, once it has been sent.
+async fn second_since_time(server: &MockServer) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let seen = server.received_requests().await.unwrap_or_default();
+        if seen.len() >= 2 {
+            return seen[1]
+                .url
+                .query_pairs()
+                .find(|(k, _)| k == "since_time")
+                .map(|(_, v)| v.into_owned());
+        }
+        assert!(Instant::now() < deadline, "no second longpoll request");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn newest_event_timestamp(payload: &Value) -> i64 {
+    payload["events"]
+        .as_array()
+        .expect("events list")
+        .iter()
+        .filter_map(|e| e["timestamp"].as_i64())
+        .max()
+        .expect("event timestamps")
+}
+
+#[tokio::test]
+async fn longpoll_events_are_delivered() {
+    let payload = load_or_skip!("longpoll_events.json");
+    let quiet = json!({"timeout": "no events before timeout", "timestamp": 1});
+    let expected: Vec<Value> = payload["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["data"]["result"].clone())
+        .collect();
+    let (mut poll, server) = longpoll_against(&payload, &quiet).await;
+    for want in &expected {
+        let got = tokio::time::timeout(Duration::from_secs(5), poll.matches.next())
+            .await
+            .expect("timed out")
+            .expect("a match per event");
+        assert_eq!(got.radio_id, want["radio_id"].as_i64());
+        assert_eq!(
+            got.song.artist.as_deref(),
+            want["results"][0]["artist"].as_str()
+        );
+        assert_eq!(
+            got.song.title.as_deref(),
+            want["results"][0]["title"].as_str()
+        );
+    }
+    assert_eq!(
+        second_since_time(&server).await,
+        Some(newest_event_timestamp(&payload).to_string())
+    );
+    poll.close().await;
+}
+
+#[tokio::test]
+async fn longpoll_no_events_advances_since_time() {
+    let payload = load_or_skip!("longpoll_no_events.json");
+    let (mut poll, server) = longpoll_against(&payload, &payload).await;
+    assert_eq!(
+        second_since_time(&server).await,
+        payload["timestamp"].as_i64().map(|t| t.to_string())
+    );
+    assert!(poll.matches.next().now_or_never().is_none());
+    poll.close().await;
+}
+
+#[tokio::test]
+async fn longpoll_error_is_an_invalid_request() {
+    let payload = load_or_skip!("longpoll_error.json");
+    let (mut poll, server) = longpoll_against(&payload, &payload).await;
+    let err = tokio::time::timeout(Duration::from_secs(5), poll.errors.next())
+        .await
+        .expect("timed out")
+        .expect("an error");
+    assert!(err.is_invalid_request(), "got {err:?}");
+    assert!(err.to_string().contains(payload["error"].as_str().unwrap()));
+    assert!(poll.matches.next().await.is_none(), "polling stops");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
 #[test]

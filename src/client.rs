@@ -12,7 +12,7 @@ use crate::advanced::Advanced;
 use crate::custom_catalog::CustomCatalog;
 use crate::errors::{raise_from_error_response, AudDError};
 use crate::http::{HttpClient, HttpResponse, TimeoutProfile};
-use crate::models::{EnterpriseChunkResult, EnterpriseMatch, RecognitionResult};
+use crate::models::{lenient_list, EnterpriseChunkResult, EnterpriseMatch, RecognitionResult};
 use crate::retry::{retry_async, RetryClass, RetryPolicy};
 use crate::source::{prepare_source, Source};
 use crate::streams::Streams;
@@ -345,7 +345,7 @@ impl AudDBuilder {
     /// ```no_run
     /// # use std::sync::Arc;
     /// # use audd::{AudD, AudDEvent, EventKind};
-    /// let audd = AudD::builder("test")
+    /// let audd = AudD::builder("your-api-token")
     ///     .on_event(Arc::new(|e: &AudDEvent| {
     ///         eprintln!("audd[{:?}] {} -> {:?}", e.kind, e.method, e.http_status);
     ///     }))
@@ -725,21 +725,30 @@ pub struct RecognizeOptions<'a> {
 }
 
 /// Optional parameters for [`AudD::recognize_enterprise`].
+///
+/// The server splits the file into 12-second chunks and counts one request
+/// per chunk it recognizes. `every` and `skip` choose which chunks those are:
+/// `every: Some(1), skip: Some(4)` recognizes the first 12 seconds, skips the
+/// next 48, recognizes 12 again, and so on. `limit` caps how many chunks are
+/// recognized in total.
 #[derive(Debug, Default)]
 pub struct EnterpriseOptions<'a> {
     /// Metadata services to return (`apple_music`, `deezer`, `napster`,
     /// `musicbrainz`).
     pub return_metadata: Option<&'a [String]>,
-    /// Skip the first N seconds of the source.
+    /// Number of 12-second chunks skipped after each run of recognized
+    /// chunks.
     pub skip: Option<i64>,
-    /// Sample every N seconds.
+    /// Number of 12-second chunks recognized in a row before `skip` applies.
     pub every: Option<i64>,
-    /// Maximum number of matches.
+    /// Upper bound on the number of chunks the server recognizes.
     pub limit: Option<i64>,
-    /// Skip the first N seconds (same as `skip`, kept separately for the
-    /// upstream parameter name).
+    /// Seconds of the file to skip before the first chunk. Don't combine with
+    /// `use_timecode`.
     pub skip_first_seconds: Option<i64>,
-    /// Whether to attach timecodes to matches.
+    /// When `true`, the server uses the time in the URL's `t`,
+    /// `time_continue` or `start` parameter, if there is one, as
+    /// `skip_first_seconds`. Don't combine with `skip_first_seconds`.
     pub use_timecode: Option<bool>,
     /// Whether to compute precise per-segment offsets. Defaults on: leaving
     /// this unset (`None`) sends `accurate_offsets=true` so each match's
@@ -796,7 +805,8 @@ fn build_enterprise_fields(
 fn decode_recognize(resp: HttpResponse) -> Result<Option<RecognitionResult>, AudDError> {
     let body = decode_or_raise(resp, /* custom_catalog_context = */ false)?;
     let result = body.get("result").cloned().unwrap_or(Value::Null);
-    if result.is_null() {
+    // `null` means no match; so does any other non-object `result`.
+    if !result.is_object() {
         return Ok(None);
     }
     let rr: RecognitionResult =
@@ -809,15 +819,10 @@ fn decode_recognize(resp: HttpResponse) -> Result<Option<RecognitionResult>, Aud
 
 fn decode_enterprise(resp: HttpResponse) -> Result<Vec<EnterpriseMatch>, AudDError> {
     let body = decode_or_raise(resp, /* custom_catalog_context = */ false)?;
-    let chunks_value = body.get("result").cloned().unwrap_or(Value::Null);
-    if chunks_value.is_null() {
-        return Ok(Vec::new());
-    }
+    // A non-list `result` holds no matches; chunks that don't decode are
+    // skipped.
     let chunks: Vec<EnterpriseChunkResult> =
-        serde_json::from_value(chunks_value.clone()).map_err(|e| AudDError::Serialization {
-            message: format!("could not parse enterprise result: {e}"),
-            raw_text: chunks_value.to_string(),
-        })?;
+        lenient_list(body.get("result").cloned().unwrap_or(Value::Null));
     // Each chunk's `offset` anchors its songs in the user's file. Stamp every
     // song's file-relative start/end seconds from the chunk base, then flatten
     // the songs across all chunks into one list.
@@ -1007,6 +1012,34 @@ mod tests {
         let v = decode_enterprise(resp_ok(body)).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].score, Some(80));
+    }
+
+    #[test]
+    fn non_object_recognize_result_is_no_match() {
+        for result in [json!([]), json!("x"), json!(3)] {
+            let body = json!({"status": "success", "result": result});
+            assert!(decode_recognize(resp_ok(body)).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn enterprise_decode_skips_bad_entries() {
+        let body = json!({"status": "success", "result": {}});
+        assert_eq!(
+            decode_enterprise(resp_ok(body)).unwrap(),
+            Vec::<EnterpriseMatch>::new()
+        );
+
+        let body = json!({
+            "status": "success",
+            "result": [
+                "bad chunk",
+                {"offset": "00:00", "songs": ["bad", {"score": 90, "title": "kept"}, 7]}
+            ]
+        });
+        let v = decode_enterprise(resp_ok(body)).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].title.as_deref(), Some("kept"));
     }
 
     #[test]

@@ -4,13 +4,10 @@
 //! user/server who derived the category is responsible for ensuring a callback
 //! URL is set on their account (we can't preflight that without a token).
 //!
-//! Hardening:
-//! * HTTP non-2xx → [`crate::AudDError::Server`] (not silent loop forever)
-//! * JSON decode failure on 2xx → [`crate::AudDError::Serialization`]
-//! * Retries (READ class) on 5xx + connection errors
-//! * Configurable `max_attempts` / `backoff_factor` via the builder.
-//! * Keepalive ticks (`{"timeout": "no events before timeout"}`) are silently
-//!   absorbed — the cursor advances and the consumer never sees them.
+//! [`LongpollPoll`] describes how each response is handled. Connection
+//! failures and HTTP 408, 429 and 5xx are retried within the builder's
+//! `max_attempts` / `backoff_factor` budget; a failure that outlasts it
+//! arrives on [`LongpollPoll::errors`].
 
 use crate::errors::AudDError;
 use crate::http::BareHttpClient;
@@ -104,9 +101,13 @@ pub struct LongpollConsumer {
 /// Per-iteration knobs passed to [`LongpollConsumer::iterate`].
 #[derive(Debug, Clone)]
 pub struct LongpollIterateOptions {
-    /// Cursor returned by the server on the previous tick.
+    /// Ask only for events newer than this server timestamp (Unix
+    /// milliseconds), such as the `timestamp` of the last event a previous
+    /// subscription handled.
     pub since_time: Option<i64>,
-    /// Server-side long-poll wait in seconds (default 50, capped server-side).
+    /// Seconds the server holds each request open while waiting for events:
+    /// 1 to 120, default 50. The server rejects other values, and the
+    /// rejection arrives on [`LongpollPoll::errors`].
     pub timeout: i64,
 }
 
@@ -139,11 +140,8 @@ impl LongpollConsumer {
 
     /// Begin a longpoll subscription. Returns a [`LongpollPoll`] handle whose
     /// typed streams (matches / notifications / errors) are fed by a
-    /// background tokio task. Drop the handle (or call `close().await`) to
-    /// shut it down.
-    ///
-    /// Server keepalive ticks (`{"timeout": "no events before timeout"}`) are
-    /// silently absorbed.
+    /// background tokio task; [`LongpollPoll`] describes how each response
+    /// is handled. Drop the handle (or call `close().await`) to shut it down.
     #[must_use]
     pub fn iterate(&self, opts: LongpollIterateOptions) -> LongpollPoll {
         spawn_longpoll(LongpollDriver::Tokenless {

@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::time::Duration;
 
 use futures_core::Stream;
 use serde_json::Value;
@@ -11,11 +12,12 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::client::{decode_or_raise, AudDInner};
-use crate::errors::{AudDError, ErrorKind};
+use crate::errors::{raise_from_error_response, AudDError, ErrorKind};
 use crate::helpers::{add_return_to_url, derive_longpoll_category, parse_callback};
-use crate::http::HttpClient;
+use crate::http::{HttpClient, HttpResponse};
 use crate::models::{
-    CallbackEvent, Stream as StreamRow, StreamCallbackMatch, StreamCallbackNotification,
+    lenient_from_value, lenient_list, CallbackEvent, Stream as StreamRow, StreamCallbackMatch,
+    StreamCallbackNotification, StreamCallbackSong,
 };
 use crate::retry::{retry_async, RetryPolicy};
 
@@ -54,9 +56,20 @@ Set one first via streams.set_callback_url(...) — `https://audd.tech/empty/` i
 you only want longpolling and don't need a real receiver. \
 To skip this check, pass skip_callback_check=true.";
 
-/// Channel buffer for each of `matches` / `notifications` / `errors`. Small —
-/// we want to apply backpressure to the poll loop when the consumer is slow.
-const CHANNEL_BUFFER: usize = 16;
+/// Buffer for `matches`. Small: a slow consumer applies backpressure to the
+/// poll loop, and undelivered events wait on the server.
+const MATCH_BUFFER: usize = 16;
+
+/// Buffer for `notifications`. When it is full (nobody is reading
+/// notifications), further notifications are dropped so that matches keep
+/// flowing.
+const NOTIFICATION_BUFFER: usize = 64;
+
+/// Pause after a longpoll response that moved the `since_time` cursor neither
+/// way (an unrecognized body, an empty event list). Doubles on each further
+/// such response, up to [`LONGPOLL_IDLE_WAIT_MAX`].
+const LONGPOLL_IDLE_WAIT_START: Duration = Duration::from_secs(1);
+const LONGPOLL_IDLE_WAIT_MAX: Duration = Duration::from_secs(30);
 
 /// Boxed stream alias kept inline (avoid pulling `futures_util::stream::BoxStream`
 /// just for the type name).
@@ -82,14 +95,18 @@ impl Default for LongpollOptions {
 }
 
 impl LongpollOptions {
-    /// Set `since_time` (Unix-millis cursor returned by the server).
+    /// Ask only for events newer than this server timestamp (Unix
+    /// milliseconds), such as the `timestamp` of the last event a previous
+    /// subscription handled.
     #[must_use]
     pub fn since_time(mut self, t: i64) -> Self {
         self.since_time = Some(t);
         self
     }
 
-    /// Set the per-request long-poll timeout in seconds (server-side cap; default 50).
+    /// Seconds the server holds each request open while waiting for events:
+    /// 1 to 120, default 50. The server rejects other values, and the
+    /// rejection arrives on [`LongpollPoll::errors`].
     #[must_use]
     pub fn timeout(mut self, secs: i64) -> Self {
         self.timeout = secs;
@@ -111,12 +128,45 @@ impl LongpollOptions {
 /// * [`Self::errors`] — yields a single terminal error then closes; after an
 ///   error fires, `matches` and `notifications` close too.
 ///
+/// Read `errors` alongside `matches` (a `tokio::select!` loop does both): a
+/// loop over `matches` alone ends without saying why.
+///
+/// A background task sends `GET /longpoll/` requests one after another. Each
+/// response is one of:
+///
+/// * **Events.** Each event's `data` is the body a callback URL would
+///   receive. It is parsed like [`crate::parse_callback`] and delivered in
+///   order on `matches` or `notifications`. An event whose `data` doesn't
+///   parse, and a recognition with an empty `results` list, is skipped. The
+///   next request asks for events newer than the largest event `timestamp`.
+/// * **Timeout** (`{"timeout": "no events before timeout", "timestamp": ...}`).
+///   Nothing is delivered; the next request asks for events newer than its
+///   `timestamp`.
+/// * **Error** (`{"error": "..."}`, sent for a `timeout` outside 1 to 120 or
+///   a bad `since_time`). It arrives once on `errors` as an
+///   [`AudDError::Api`] of kind [`ErrorKind::InvalidRequest`] carrying the
+///   server's text, and polling stops: the same request would get the same
+///   answer.
+///
+/// A response that yields no new `timestamp` (an empty event list, a body in
+/// an unrecognized shape, a non-JSON body) is followed by a pause before the
+/// next request: 1 second, doubling up to 30 seconds while it repeats.
+/// Connection failures and HTTP 408, 429 and 5xx are retried with backoff
+/// within the client's `max_attempts` budget; a failure that outlasts it, or
+/// any other HTTP error status, arrives on `errors` and ends the
+/// subscription.
+///
+/// The requests carry no api_token: the category authorizes them.
+///
 /// Drop the [`LongpollPoll`] (or call [`Self::close`]) to tear down the
-/// background poller.
+/// background poller; either one also abandons a request in flight.
 pub struct LongpollPoll {
     /// Recognition matches.
     pub matches: BoxStream<StreamCallbackMatch>,
     /// Stream-lifecycle notifications (e.g. `stream stopped`, `can't connect`).
+    /// Up to 64 unread notifications are buffered; beyond that, new ones are
+    /// dropped so that `matches` keeps flowing for a consumer that doesn't
+    /// read notifications.
     pub notifications: BoxStream<StreamCallbackNotification>,
     /// Terminal-error stream — yields at most one error and closes.
     pub errors: BoxStream<AudDError>,
@@ -317,15 +367,8 @@ impl<'a> Streams<'a> {
             self.inner.read_policy(),
         )
         .await?;
-        if result.is_null() {
-            return Ok(Vec::new());
-        }
-        let v: Vec<StreamRow> =
-            serde_json::from_value(result.clone()).map_err(|e| AudDError::Serialization {
-                message: format!("could not parse getStreams result: {e}"),
-                raw_text: result.to_string(),
-            })?;
-        Ok(v)
+        // Rows that don't decode are skipped; a non-list result holds none.
+        Ok(lenient_list(result))
     }
 
     /// Compute the 9-char longpoll category locally from `(api_token, radio_id)`.
@@ -348,11 +391,8 @@ impl<'a> Streams<'a> {
 
     /// Long-poll the AudD streams endpoint and return a [`LongpollPoll`]
     /// handle whose typed streams (matches / notifications / errors) are
-    /// fed by a background tokio task.
-    ///
-    /// Server keepalive ticks (`{"timeout": "no events before timeout"}`) are
-    /// silently absorbed — they advance the internal cursor and never reach
-    /// the consumer.
+    /// fed by a background tokio task. [`LongpollPoll`] describes how each
+    /// response is handled.
     ///
     /// On entry, performs a one-time `getCallbackUrl` preflight unless
     /// `opts.skip_callback_check == true`. If the server's response indicates
@@ -521,8 +561,8 @@ impl LongpollDriver {
 
 /// Spawn the background poll task and wire up the three streams.
 pub(crate) fn spawn_longpoll(driver: LongpollDriver) -> LongpollPoll {
-    let (match_tx, match_rx) = mpsc::channel::<StreamCallbackMatch>(CHANNEL_BUFFER);
-    let (notif_tx, notif_rx) = mpsc::channel::<StreamCallbackNotification>(CHANNEL_BUFFER);
+    let (match_tx, match_rx) = mpsc::channel::<StreamCallbackMatch>(MATCH_BUFFER);
+    let (notif_tx, notif_rx) = mpsc::channel::<StreamCallbackNotification>(NOTIFICATION_BUFFER);
     let (err_tx, err_rx) = mpsc::channel::<AudDError>(1);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
 
@@ -553,7 +593,7 @@ fn channel_stream<T: Send + 'static>(mut rx: mpsc::Receiver<T>) -> impl Stream<I
 
 /// Drive a single longpoll subscription: read responses, parse them, and
 /// dispatch to the typed channels. Exits when the shutdown signal is dropped,
-/// a fatal error fires, or all channels are closed.
+/// a fatal error fires, or the consumer's streams are dropped.
 async fn run_longpoll(
     driver: LongpollDriver,
     match_tx: mpsc::Sender<StreamCallbackMatch>,
@@ -564,6 +604,7 @@ async fn run_longpoll(
     let mut cur_since = driver.since_time();
     let timeout_secs = driver.timeout().to_string();
     let category = driver.category().to_string();
+    let mut idle_wait = LONGPOLL_IDLE_WAIT_START;
 
     loop {
         // Build params each iteration so since_time updates flow through.
@@ -604,69 +645,192 @@ async fn run_longpoll(
             return;
         }
 
-        let Some(body) = resp.json_body else {
-            let _ = err_tx
-                .send(AudDError::Serialization {
-                    message: "Longpoll response was not a JSON object".into(),
-                    raw_text: resp.raw_text,
-                })
-                .await;
-            return;
-        };
-
-        // Silently absorb keepalive ticks.
-        if is_longpoll_keepalive(&body) {
-            if let Some(ts) = body.get("timestamp").and_then(Value::as_i64) {
-                cur_since = Some(ts);
-            }
-            continue;
-        }
-
-        // Advance the cursor before parsing — even if parsing fails, we don't
-        // want to re-poll the same window.
-        if let Some(ts) = body.get("timestamp").and_then(Value::as_i64) {
-            cur_since = Some(ts);
-        }
-
-        match parse_callback(body) {
-            Ok(CallbackEvent::Match(m)) => {
-                tokio::select! {
-                    biased;
-                    _ = shutdown_rx.recv() => return,
-                    res = match_tx.send(m) => {
-                        if res.is_err() { return; }
-                    }
-                }
-            }
-            Ok(CallbackEvent::Notification(n)) => {
-                tokio::select! {
-                    biased;
-                    _ = shutdown_rx.recv() => return,
-                    res = notif_tx.send(n) => {
-                        if res.is_err() { return; }
-                    }
-                }
-            }
-            Err(e) => {
+        let (events, next_since) = match read_longpoll_body(resp) {
+            LongpollBody::Rejected(e) => {
                 let _ = err_tx.send(e).await;
                 return;
             }
+            LongpollBody::Batch { events, next_since } => (events, next_since),
+        };
+
+        for event in events {
+            match event {
+                CallbackEvent::Match(m) => {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx.recv() => return,
+                        res = match_tx.send(m) => {
+                            if res.is_err() { return; }
+                        }
+                    }
+                }
+                CallbackEvent::Notification(n) => match notif_tx.try_send(n) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            target: "audd",
+                            "longpoll: notification dropped; {NOTIFICATION_BUFFER} unread notifications are already buffered"
+                        );
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => return,
+                },
+            }
+        }
+
+        let advanced = next_since.is_some() && next_since != cur_since;
+        if next_since.is_some() {
+            cur_since = next_since;
+        }
+        if advanced {
+            idle_wait = LONGPOLL_IDLE_WAIT_START;
+        } else {
+            // Nothing moved the cursor, so asking again at once could only
+            // repeat this answer: pause first.
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.recv() => return,
+                () = tokio::time::sleep(idle_wait) => {}
+            }
+            idle_wait = (idle_wait * 2).min(LONGPOLL_IDLE_WAIT_MAX);
         }
     }
 }
 
-/// Reports whether `body` is a `{"timeout": "no events before timeout"}`
-/// keepalive tick — the server emits one of these every `<timeout>` seconds
-/// when no recognition or notification is queued. Mirrors audd-go's
-/// `isLongpollKeepalive` helper.
-pub(crate) fn is_longpoll_keepalive(body: &Value) -> bool {
-    let Some(obj) = body.as_object() else {
-        return false;
-    };
-    if obj.contains_key("result") || obj.contains_key("notification") {
-        return false;
+/// What one successful (2xx) longpoll response carries.
+#[derive(Debug)]
+enum LongpollBody {
+    /// Payloads to deliver, in order, and the `since_time` for the next
+    /// request when the body carried one.
+    Batch {
+        events: Vec<CallbackEvent>,
+        next_since: Option<i64>,
+    },
+    /// The server rejected the request itself; sending it again would get
+    /// the same answer.
+    Rejected(AudDError),
+}
+
+impl LongpollBody {
+    fn nothing() -> Self {
+        Self::Batch {
+            events: Vec::new(),
+            next_since: None,
+        }
     }
-    obj.contains_key("timeout")
+}
+
+/// Classify a longpoll response body: an event list, a timeout, an error, or
+/// a callback body at the top level (`result` / `notification`, with an
+/// optional `timestamp`). Anything else yields nothing.
+fn read_longpoll_body(resp: HttpResponse) -> LongpollBody {
+    let HttpResponse {
+        json_body,
+        http_status,
+        request_id,
+        ..
+    } = resp;
+    let Some(body) = json_body else {
+        tracing::warn!(target: "audd", "longpoll: response body is not JSON");
+        return LongpollBody::nothing();
+    };
+    let Some(obj) = body.as_object() else {
+        tracing::warn!(target: "audd", "longpoll: response body is not a JSON object");
+        return LongpollBody::nothing();
+    };
+
+    if obj.get("status").and_then(Value::as_str) == Some("error") {
+        return LongpollBody::Rejected(raise_from_error_response(
+            &body,
+            http_status,
+            request_id,
+            false,
+        ));
+    }
+
+    if let Some(events) = obj.get("events") {
+        let Some(list) = events.as_array() else {
+            tracing::warn!(target: "audd", "longpoll: `events` is not a list");
+            return LongpollBody::nothing();
+        };
+        let mut delivered = Vec::with_capacity(list.len());
+        let mut newest: Option<i64> = None;
+        for event in list {
+            if let Some(ts) = event.get("timestamp").and_then(timestamp_of) {
+                newest = Some(newest.map_or(ts, |n| n.max(ts)));
+            }
+            if let Some(parsed) = event.get("data").and_then(callback_event_from) {
+                delivered.push(parsed);
+            }
+        }
+        return LongpollBody::Batch {
+            events: delivered,
+            next_since: newest,
+        };
+    }
+
+    if obj.contains_key("result") || obj.contains_key("notification") {
+        return LongpollBody::Batch {
+            events: callback_event_from(&body).into_iter().collect(),
+            next_since: obj.get("timestamp").and_then(timestamp_of),
+        };
+    }
+
+    if let Some(error) = obj.get("error") {
+        let message = error
+            .as_str()
+            .map_or_else(|| error.to_string(), str::to_string);
+        return LongpollBody::Rejected(AudDError::Api {
+            code: 0,
+            message,
+            kind: ErrorKind::InvalidRequest,
+            http_status,
+            request_id,
+            requested_params: HashMap::new(),
+            request_method: None,
+            branded_message: None,
+            raw_response: body,
+        });
+    }
+
+    if obj.contains_key("timeout") {
+        return LongpollBody::Batch {
+            events: Vec::new(),
+            next_since: obj.get("timestamp").and_then(timestamp_of),
+        };
+    }
+
+    tracing::warn!(target: "audd", "longpoll: response body has an unrecognized shape");
+    LongpollBody::nothing()
+}
+
+fn timestamp_of(v: &Value) -> Option<i64> {
+    lenient_from_value(v.clone())
+}
+
+/// Parse one event's `data` (an object, or a JSON string holding one) with the
+/// callback parser. Returns `None` for data that doesn't parse and for a
+/// recognition without any song.
+fn callback_event_from(data: &Value) -> Option<CallbackEvent> {
+    let decoded;
+    let data = if let Value::String(text) = data {
+        decoded = serde_json::from_str::<Value>(text).ok();
+        decoded.as_ref()?
+    } else {
+        data
+    };
+    match parse_callback(data.clone()) {
+        Ok(CallbackEvent::Match(m))
+            if m.song == StreamCallbackSong::default() && m.alternatives.is_empty() =>
+        {
+            tracing::debug!(target: "audd", "longpoll: skipped a recognition with no results");
+            None
+        }
+        Ok(event) => Some(event),
+        Err(e) => {
+            tracing::warn!(target: "audd", "longpoll: skipped an event that doesn't parse: {e}");
+            None
+        }
+    }
 }
 
 /// Internal — POST a form body to a streams-namespace endpoint and return the
@@ -754,27 +918,155 @@ mod tests {
         assert!(!indicates_no_callback_url("request blocked"));
     }
 
+    fn ok(body: Value) -> HttpResponse {
+        HttpResponse {
+            raw_text: body.to_string(),
+            json_body: Some(body),
+            http_status: 200,
+            request_id: None,
+        }
+    }
+
+    fn batch(body: LongpollBody) -> (Vec<CallbackEvent>, Option<i64>) {
+        match body {
+            LongpollBody::Batch { events, next_since } => (events, next_since),
+            LongpollBody::Rejected(e) => panic!("unexpected rejection: {e:?}"),
+        }
+    }
+
+    fn recognition(radio_id: i64, title: &str) -> Value {
+        serde_json::json!({
+            "status": "success",
+            "result": {
+                "radio_id": radio_id,
+                "results": [{"artist": "A", "title": title, "score": 100}]
+            }
+        })
+    }
+
     #[test]
-    fn keepalive_detection() {
-        let kp = serde_json::json!({"timeout": "no events before timeout", "timestamp": 1});
-        assert!(is_longpoll_keepalive(&kp));
+    fn events_are_parsed_in_order_and_newest_timestamp_wins() {
+        let body = serde_json::json!({"events": [
+            {"timestamp": 20, "category": "c", "data": recognition(1, "first")},
+            {"timestamp": 10, "category": "c", "data": {
+                "status": "-",
+                "notification": {"radio_id": 1, "notification_code": 650},
+                "time": 5
+            }},
+            {"timestamp": 30, "category": "c", "data": recognition(1, "third").to_string()},
+        ]});
+        let (events, next) = batch(read_longpoll_body(ok(body)));
+        assert_eq!(next, Some(30));
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events[0].as_match().unwrap().song.title.as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            events[1].as_notification().unwrap().notification_code,
+            Some(650)
+        );
+        // `data` sent as a JSON string is decoded first.
+        assert_eq!(
+            events[2].as_match().unwrap().song.title.as_deref(),
+            Some("third")
+        );
+    }
 
-        let with_result = serde_json::json!({
-            "result": {"radio_id": 1, "results": []},
-            "timeout": "no events"
+    #[test]
+    fn unparseable_and_empty_events_are_skipped_but_advance_the_cursor() {
+        let body = serde_json::json!({"events": [
+            {"timestamp": 1, "data": {"status": "success", "result": {"radio_id": 1, "results": []}}},
+            {"timestamp": 2, "data": {"status": "success"}},
+            {"timestamp": 3, "data": "not json"},
+            {"timestamp": "4", "data": 17},
+            {"data": recognition(2, "kept")},
+        ]});
+        let (events, next) = batch(read_longpoll_body(ok(body)));
+        assert_eq!(next, Some(4));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].as_match().unwrap().radio_id, Some(2));
+    }
+
+    #[test]
+    fn empty_event_list_yields_nothing() {
+        let (events, next) = batch(read_longpoll_body(ok(serde_json::json!({"events": []}))));
+        assert_eq!(events, Vec::<CallbackEvent>::new());
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn timeout_body_advances_the_cursor() {
+        let body = serde_json::json!({"timeout": "no events before timeout", "timestamp": 77});
+        let (events, next) = batch(read_longpoll_body(ok(body)));
+        assert_eq!(events, Vec::<CallbackEvent>::new());
+        assert_eq!(next, Some(77));
+    }
+
+    #[test]
+    fn error_body_is_an_invalid_request_with_the_server_text() {
+        let body = serde_json::json!({"error": "Invalid timeout arg.  Must be 1-120."});
+        match read_longpoll_body(ok(body)) {
+            LongpollBody::Rejected(e) => {
+                assert!(e.is_invalid_request(), "{e:?}");
+                match e {
+                    AudDError::Api { message, .. } => {
+                        assert_eq!(message, "Invalid timeout arg.  Must be 1-120.");
+                    }
+                    other => panic!("expected Api, got {other:?}"),
+                }
+            }
+            other @ LongpollBody::Batch { .. } => panic!("expected rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn standard_error_envelope_is_rejected_with_its_code() {
+        let body = serde_json::json!({
+            "status": "error",
+            "error": {"error_code": 900, "error_message": "bad token"}
         });
-        assert!(!is_longpoll_keepalive(&with_result));
+        match read_longpoll_body(ok(body)) {
+            LongpollBody::Rejected(e) => assert!(e.is_authentication(), "{e:?}"),
+            other @ LongpollBody::Batch { .. } => panic!("expected rejection, got {other:?}"),
+        }
+    }
 
-        let with_notif = serde_json::json!({
-            "notification": {"radio_id": 1},
-            "timeout": "x"
-        });
-        assert!(!is_longpoll_keepalive(&with_notif));
+    #[test]
+    fn top_level_callback_body_is_one_event() {
+        let mut body = recognition(9, "legacy");
+        body["timestamp"] = serde_json::json!(5);
+        let (events, next) = batch(read_longpoll_body(ok(body)));
+        assert_eq!(next, Some(5));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].as_match().unwrap().radio_id, Some(9));
 
-        let no_timeout = serde_json::json!({"timestamp": 1});
-        assert!(!is_longpoll_keepalive(&no_timeout));
+        let (events, next) = batch(read_longpoll_body(ok(recognition(9, "no ts"))));
+        assert_eq!(next, None);
+        assert_eq!(events.len(), 1);
+    }
 
-        let not_object = serde_json::json!([1, 2, 3]);
-        assert!(!is_longpoll_keepalive(&not_object));
+    #[test]
+    fn junk_bodies_yield_nothing() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"events": "nope"}),
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!("text"),
+            serde_json::json!({"timeout": "no events before timeout"}),
+        ] {
+            let (events, next) = batch(read_longpoll_body(ok(body)));
+            assert_eq!(events, Vec::<CallbackEvent>::new());
+            assert_eq!(next, None);
+        }
+        let not_json = HttpResponse {
+            json_body: None,
+            http_status: 200,
+            request_id: None,
+            raw_text: "<html>".into(),
+        };
+        let (events, next) = batch(read_longpoll_body(not_json));
+        assert_eq!(events, Vec::<CallbackEvent>::new());
+        assert_eq!(next, None);
     }
 }

@@ -203,6 +203,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_callback_skips_results_entries_that_do_not_decode() {
+        let body = serde_json::json!({
+            "result": {"radio_id": 7, "results": ["bad", {"title": "Y"}, {"title": "Z"}]}
+        });
+        let m = parse_callback(body).unwrap();
+        let m = m.as_match().unwrap();
+        assert_eq!(m.song.title.as_deref(), Some("Y"));
+        assert_eq!(m.alternatives.len(), 1);
+    }
+
+    #[test]
     fn parse_callback_notification() {
         let body = serde_json::json!({
             "status": "-",

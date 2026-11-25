@@ -14,8 +14,10 @@ use crate::http::HttpResponse;
 ///   `advanced.raw_request`: retry on pre-upload connection failures + 5xx.
 ///   Do NOT retry on read-timeout-after-upload (cost protection).
 /// * `Mutating` — `streams.set_callback_url`, `streams.add`, `streams.delete`,
-///   etc., `custom_catalog.add`: retry only on pre-upload connection failures.
-///   Do NOT retry 5xx (the side effect may have happened).
+///   etc.: retry only on pre-upload connection failures. Do NOT retry 5xx
+///   (the side effect may have happened).
+///
+/// `custom_catalog.add` is sent once and never retried automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryClass {
     /// Idempotent reads.

@@ -1,6 +1,6 @@
 [package]
 name = "audd"
-version = "1.5.15"
+version = "1.5.16"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT"
@@ -11,7 +11,7 @@ documentation = "https://docs.rs/audd"
 keywords = ["audd", "music", "recognition", "audio", "fingerprint"]
 categories = ["api-bindings", "multimedia::audio"]
 readme = "README.md"
-exclude = ["tests/integration*", ".github/*"]
+exclude = ["tests/integration*", "tests/fixtures/*", ".github/*"]
 
 [features]
 # `rustls-tls` is the default and matches the v0.2 behavior (Mozilla CA bundle,

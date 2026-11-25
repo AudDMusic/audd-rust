@@ -27,7 +27,7 @@ pub(crate) struct HttpResponse {
     pub(crate) raw_text: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct HttpClient {
     inner: Client,
     /// Shared, mutable api_token. Wrapped so [`AudD::set_api_token`] can rotate
@@ -38,6 +38,16 @@ pub(crate) struct HttpClient {
     /// Whether we own the inner `Client` (and should disregard explicit close
     /// when the caller injected their own).
     owned: bool,
+}
+
+impl std::fmt::Debug for HttpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpClient")
+            .field("inner", &self.inner)
+            .field("api_token", &"<redacted>")
+            .field("owned", &self.owned)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,26 +119,15 @@ impl HttpClient {
         wrap(resp).await
     }
 
+    /// Send a GET without the api_token. The only GET endpoint, `/longpoll/`,
+    /// is authorized by its `category`, so the token never goes into a URL.
     pub(crate) async fn get(
         &self,
         url: &str,
         query: &[(&str, String)],
         per_call_timeout: Option<Duration>,
     ) -> Result<HttpResponse, AudDError> {
-        let mut q: Vec<(String, String)> = query
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), v.clone()))
-            .collect();
-        // Default api_token onto the query if not already there.
-        if !q.iter().any(|(k, _)| k == "api_token") {
-            q.push(("api_token".to_string(), self.token_snapshot()));
-        }
-        let mut req = self.inner.get(url).query(&q);
-        if let Some(t) = per_call_timeout {
-            req = req.timeout(t);
-        }
-        let resp = req.send().await.map_err(map_reqwest_error)?;
-        wrap(resp).await
+        send_get(&self.inner, url, query, per_call_timeout).await
     }
 
     pub(crate) fn close(&self) {
@@ -160,12 +159,40 @@ async fn wrap(resp: reqwest::Response) -> Result<HttpResponse, AudDError> {
     })
 }
 
-pub(crate) fn map_reqwest_error(e: reqwest::Error) -> AudDError {
+async fn send_get(
+    client: &Client,
+    url: &str,
+    query: &[(&str, String)],
+    per_call_timeout: Option<Duration>,
+) -> Result<HttpResponse, AudDError> {
+    let mut req = client.get(url).query(query);
+    if let Some(t) = per_call_timeout {
+        req = req.timeout(t);
+    }
+    let resp = req.send().await.map_err(map_reqwest_error)?;
+    wrap(resp).await
+}
+
+/// Wrap a transport error. reqwest puts the request URL into its error text;
+/// the query string and any credentials are removed from it first, so the
+/// message (and the boxed source) is safe to log.
+pub(crate) fn map_reqwest_error(mut e: reqwest::Error) -> AudDError {
+    if let Some(url) = e.url_mut() {
+        redact_url(url);
+    }
     let msg = e.to_string();
     AudDError::Connection {
         message: msg,
         source: Some(Box::new(e)),
     }
+}
+
+fn redact_url(url: &mut reqwest::Url) {
+    url.set_query(None);
+    url.set_fragment(None);
+    // Both only fail for URLs that can't carry credentials in the first place.
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
 }
 
 /// A simple bare HTTP client used by the tokenless `LongpollConsumer` — no
@@ -207,15 +234,53 @@ impl BareHttpClient {
         query: &[(&str, String)],
         per_call_timeout: Option<Duration>,
     ) -> Result<HttpResponse, AudDError> {
-        let q: Vec<(String, String)> = query
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), v.clone()))
-            .collect();
-        let mut req = self.inner.get(url).query(&q);
-        if let Some(t) = per_call_timeout {
-            req = req.timeout(t);
-        }
-        let resp = req.send().await.map_err(map_reqwest_error)?;
-        wrap(resp).await
+        send_get(&self.inner, url, query, per_call_timeout).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_output_has_no_token() {
+        let audd = crate::AudD::new("debug-secret-token");
+        let shown = format!("{audd:?}");
+        assert!(!shown.contains("debug-secret-token"), "{shown}");
+    }
+
+    #[test]
+    fn redact_url_drops_query_and_credentials() {
+        let mut url = reqwest::Url::parse(
+            "https://user:pass@api.audd.io/longpoll/?category=abc&api_token=x#f",
+        )
+        .unwrap();
+        redact_url(&mut url);
+        assert_eq!(url.as_str(), "https://api.audd.io/longpoll/");
+    }
+
+    #[tokio::test]
+    async fn transport_error_text_has_no_query() {
+        // Nothing listens on the port, so the GET fails with a connect error
+        // whose text names the URL.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let client = Client::new();
+        let err = send_get(
+            &client,
+            &format!("http://{addr}/longpoll/"),
+            &[
+                ("category", "abc123def".into()),
+                ("api_token", "secret-value".into()),
+            ],
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap_err();
+        let shown = format!("{err} {err:?}");
+        assert!(!shown.contains("secret-value"), "{shown}");
+        assert!(!shown.contains("abc123def"), "{shown}");
+        assert!(shown.contains("/longpoll/"), "{shown}");
     }
 }

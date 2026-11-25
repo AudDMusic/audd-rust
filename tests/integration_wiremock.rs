@@ -413,9 +413,10 @@ async fn custom_catalog_904_overrides_message() {
 
 #[tokio::test]
 async fn custom_catalog_does_not_retry_on_5xx() {
-    // Custom-catalog upload is metered; a 5xx must surface after exactly one
-    // attempt even if the client is otherwise configured to retry several
-    // times. We use wiremock's request counter to assert exactly 1 hit.
+    // custom_catalog.add is never retried automatically: a 5xx must surface
+    // after exactly one attempt even if the client is otherwise configured
+    // to retry several times. We use wiremock's request counter to assert
+    // exactly 1 hit.
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
     use wiremock::{Request, Respond};
@@ -459,7 +460,7 @@ async fn custom_catalog_does_not_retry_on_5xx() {
     assert_eq!(
         count.load(Ordering::SeqCst),
         1,
-        "custom_catalog.add must not retry on 5xx (metered endpoint)",
+        "custom_catalog.add must not retry on 5xx",
     );
 }
 
@@ -806,6 +807,26 @@ async fn streams_list_tolerates_wrong_typed_fields() {
     assert_eq!(v[0].url.as_deref(), Some("twitch:a"));
 }
 
+#[tokio::test]
+async fn streams_list_skips_rows_that_do_not_decode() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/getStreams/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "success",
+            "result": [1, {"radio_id": 3, "url": "twitch:b", "stream_running": true}]
+        })))
+        .mount(&server)
+        .await;
+    let audd = AudD::builder("test")
+        .api_base(server.uri())
+        .build()
+        .unwrap();
+    let v = audd.streams().list().await.unwrap();
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].radio_id, Some(3));
+}
+
 // ----- Preflight: only the no-callback #19 is rewritten -----
 
 #[tokio::test]
@@ -935,4 +956,361 @@ async fn on_event_fires_for_streams_and_advanced_calls() {
         responses.iter().any(|e| e.method == "someMethod"),
         "advanced raw requests must emit events, got {events:#?}"
     );
+}
+
+// ----- Longpoll response shapes (fixtures copied from audd-openapi) -----
+
+mod longpoll_shapes {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use audd::longpoll::LongpollIterateOptions;
+    use audd::streams::{LongpollOptions, LongpollPoll};
+    use audd::{AudD, AudDError, LongpollConsumer};
+    use futures_util::{FutureExt, StreamExt};
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    const EVENTS: &str = include_str!("fixtures/longpoll_events.json");
+    const NO_EVENTS: &str = include_str!("fixtures/longpoll_no_events.json");
+    const ERROR: &str = include_str!("fixtures/longpoll_error.json");
+    const TOKEN: &str = "longpoll-secret-token";
+    const CATEGORY: &str = "abc123def";
+
+    /// Answers successive longpoll requests with `bodies` in order, then
+    /// repeats the last one.
+    struct Sequence {
+        bodies: Vec<String>,
+        served: Arc<AtomicUsize>,
+        delay: Duration,
+    }
+
+    impl Respond for Sequence {
+        fn respond(&self, _: &Request) -> ResponseTemplate {
+            let n = self.served.fetch_add(1, Ordering::SeqCst);
+            let body = &self.bodies[n.min(self.bodies.len() - 1)];
+            ResponseTemplate::new(200)
+                .set_body_raw(body.clone(), "application/json")
+                .set_delay(self.delay)
+        }
+    }
+
+    async fn server_with_delay(bodies: &[&str], delay: Duration) -> (MockServer, Arc<AtomicUsize>) {
+        let server = MockServer::start().await;
+        let served = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/longpoll/"))
+            .respond_with(Sequence {
+                bodies: bodies.iter().map(|b| (*b).to_string()).collect(),
+                served: Arc::clone(&served),
+                delay,
+            })
+            .mount(&server)
+            .await;
+        (server, served)
+    }
+
+    async fn server(bodies: &[&str]) -> (MockServer, Arc<AtomicUsize>) {
+        server_with_delay(bodies, Duration::ZERO).await
+    }
+
+    async fn authenticated(base: String) -> LongpollPoll {
+        let audd = AudD::builder(TOKEN)
+            .api_base(base)
+            .max_attempts(1)
+            .build()
+            .unwrap();
+        audd.streams()
+            .longpoll(
+                CATEGORY,
+                LongpollOptions::default()
+                    .skip_callback_check(true)
+                    .timeout(1),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn tokenless(base: &str) -> LongpollPoll {
+        LongpollConsumer::builder(CATEGORY)
+            .base_url(format!("{base}/longpoll/"))
+            .max_attempts(1)
+            .build()
+            .unwrap()
+            .iterate(LongpollIterateOptions {
+                timeout: 1,
+                ..Default::default()
+            })
+    }
+
+    /// The longpoll requests the server has seen, once there are at least
+    /// `n` of them (or after 5 seconds).
+    async fn requests(server: &MockServer, n: usize) -> Vec<Request> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let seen: Vec<Request> = server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.url.path() == "/longpoll/")
+                .collect();
+            if seen.len() >= n || Instant::now() >= deadline {
+                return seen;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn param(req: &Request, key: &str) -> Option<String> {
+        req.url
+            .query_pairs()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into_owned())
+    }
+
+    async fn next_within<S: futures_util::Stream + Unpin>(stream: &mut S) -> Option<S::Item> {
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("timed out waiting for the stream")
+    }
+
+    async fn assert_delivers_events_fixture(mut poll: LongpollPoll, server: &MockServer) {
+        let first = next_within(&mut poll.matches).await.expect("first match");
+        assert_eq!(first.radio_id, Some(7));
+        assert_eq!(
+            first.song.artist.as_deref(),
+            Some("Alan Walker, A$AP Rocky")
+        );
+        assert_eq!(first.song.title.as_deref(), Some("Live Fast (PUBGM)"));
+
+        let second = next_within(&mut poll.matches).await.expect("second match");
+        assert_eq!(second.radio_id, Some(7));
+        assert_eq!(second.song.artist.as_deref(), Some("Tears For Fears"));
+        assert_eq!(
+            second.song.title.as_deref(),
+            Some("Everybody Wants To Rule The World")
+        );
+
+        let seen = requests(server, 2).await;
+        assert!(seen.len() >= 2, "expected a follow-up request");
+        assert_eq!(param(&seen[0], "since_time"), None);
+        assert_eq!(param(&seen[0], "category").as_deref(), Some(CATEGORY));
+        assert_eq!(
+            param(&seen[1], "since_time").as_deref(),
+            Some("1795547548112")
+        );
+        assert!(
+            poll.errors.next().now_or_never().is_none(),
+            "no error expected"
+        );
+        poll.close().await;
+    }
+
+    #[tokio::test]
+    async fn events_fixture_delivers_both_songs_and_advances_since_time() {
+        let (server, _) = server(&[EVENTS, NO_EVENTS]).await;
+        let poll = authenticated(server.uri()).await;
+        assert_delivers_events_fixture(poll, &server).await;
+    }
+
+    #[tokio::test]
+    async fn tokenless_events_fixture_delivers_both_songs_and_advances_since_time() {
+        let (server, _) = server(&[EVENTS, NO_EVENTS]).await;
+        let poll = tokenless(&server.uri());
+        assert_delivers_events_fixture(poll, &server).await;
+    }
+
+    #[tokio::test]
+    async fn longpoll_request_carries_no_api_token() {
+        let (server, _) = server(&[EVENTS, NO_EVENTS]).await;
+        let mut poll = authenticated(server.uri()).await;
+        next_within(&mut poll.matches).await.expect("a match");
+        let seen = requests(&server, 2).await;
+        poll.close().await;
+        assert!(!seen.is_empty());
+        for req in &seen {
+            assert!(!req.url.as_str().contains(TOKEN), "token in {}", req.url);
+            assert_eq!(param(req, "api_token"), None, "api_token in {}", req.url);
+            for (name, value) in &req.headers {
+                assert!(
+                    !value
+                        .as_bytes()
+                        .windows(TOKEN.len())
+                        .any(|w| w == TOKEN.as_bytes()),
+                    "token in header {name}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_fixture_delivers_nothing_and_sends_its_timestamp() {
+        let later =
+            json!({"timeout": "no events before timeout", "timestamp": 1_777_901_270_050_i64})
+                .to_string();
+        let (server, _) = server(&[NO_EVENTS, &later]).await;
+        let mut poll = authenticated(server.uri()).await;
+        let seen = requests(&server, 2).await;
+        assert!(seen.len() >= 2, "expected a follow-up request");
+        assert_eq!(
+            param(&seen[1], "since_time").as_deref(),
+            Some("1777901270049")
+        );
+        assert!(
+            poll.matches.next().now_or_never().is_none(),
+            "no match expected"
+        );
+        assert!(
+            poll.notifications.next().now_or_never().is_none(),
+            "no notification expected"
+        );
+        assert!(
+            poll.errors.next().now_or_never().is_none(),
+            "no error expected"
+        );
+        poll.close().await;
+    }
+
+    async fn assert_error_fixture_stops(mut poll: LongpollPoll, served: &AtomicUsize) {
+        let err = next_within(&mut poll.errors).await.expect("an error");
+        assert!(err.is_invalid_request(), "got {err:?}");
+        match &err {
+            AudDError::Api { message, .. } => {
+                assert_eq!(message, "Invalid timeout arg.  Must be 1-120.");
+            }
+            other => panic!("expected Api, got {other:?}"),
+        }
+        // The poller has stopped: every stream is closed.
+        assert!(next_within(&mut poll.errors).await.is_none());
+        assert!(next_within(&mut poll.matches).await.is_none());
+        assert!(next_within(&mut poll.notifications).await.is_none());
+        assert_eq!(served.load(Ordering::SeqCst), 1, "exactly one request");
+    }
+
+    #[tokio::test]
+    async fn error_fixture_surfaces_once_and_stops_polling() {
+        let (server, served) = server(&[ERROR]).await;
+        let poll = authenticated(server.uri()).await;
+        assert_error_fixture_stops(poll, &served).await;
+    }
+
+    #[tokio::test]
+    async fn tokenless_error_fixture_surfaces_once_and_stops_polling() {
+        let (server, served) = server(&[ERROR]).await;
+        let poll = tokenless(&server.uri());
+        assert_error_fixture_stops(poll, &served).await;
+    }
+
+    #[tokio::test]
+    async fn bad_events_are_skipped_and_polling_continues() {
+        let match_body = |title: &str| {
+            json!({
+                "status": "success",
+                "result": {"radio_id": 4, "results": [{"artist": "A", "title": title}]}
+            })
+        };
+        let body = json!({"events": [
+            {"timestamp": 101, "data": {"status": "success", "result": {"radio_id": 4, "results": []}}},
+            {"timestamp": 102, "data": "{not json"},
+            {"timestamp": 103, "data": {"status": "-", "notification": {
+                "radio_id": 4, "notification_code": 650, "notification_message": "stopped"
+            }, "time": 1}},
+            {"timestamp": 104, "data": match_body("from a string").to_string()},
+        ]})
+        .to_string();
+        let (server, _) = server(&[&body, NO_EVENTS]).await;
+        let mut poll = tokenless(&server.uri());
+
+        let n = next_within(&mut poll.notifications)
+            .await
+            .expect("notification");
+        assert_eq!(n.notification_code, Some(650));
+        let m = next_within(&mut poll.matches).await.expect("match");
+        assert_eq!(m.song.title.as_deref(), Some("from a string"));
+
+        let seen = requests(&server, 2).await;
+        assert!(seen.len() >= 2, "polling must continue");
+        assert_eq!(param(&seen[1], "since_time").as_deref(), Some("104"));
+        assert!(
+            poll.errors.next().now_or_never().is_none(),
+            "no error expected"
+        );
+        poll.close().await;
+    }
+
+    #[tokio::test]
+    async fn unread_notifications_do_not_block_matches() {
+        let mut events: Vec<serde_json::Value> = (0..100)
+            .map(|i| {
+                json!({"timestamp": i, "data": {"status": "-", "notification": {
+                    "radio_id": 1, "notification_code": 650
+                }}})
+            })
+            .collect();
+        events.push(
+            json!({"timestamp": 100, "data": {"status": "success", "result": {
+                "radio_id": 1, "results": [{"artist": "A", "title": "after notifications"}]
+            }}}),
+        );
+        let body = json!({ "events": events }).to_string();
+        let (server, _) = server(&[&body, NO_EVENTS]).await;
+        let mut poll = tokenless(&server.uri());
+        let m = next_within(&mut poll.matches).await.expect("match");
+        assert_eq!(m.song.title.as_deref(), Some("after notifications"));
+        poll.close().await;
+    }
+
+    #[tokio::test]
+    async fn junk_bodies_do_not_spin() {
+        let (server, served) =
+            server(&["<html>oops</html>", "", "{}", r#"{"events": []}"#, "[1, 2]"]).await;
+        let mut poll = tokenless(&server.uri());
+        tokio::time::sleep(Duration::from_millis(3500)).await;
+        let count = served.load(Ordering::SeqCst);
+        // Pauses of 1 s, 2 s, ... between requests: three requests in 3.5 s.
+        assert!((2..=4).contains(&count), "{count} requests in 3.5 s");
+        assert!(
+            poll.errors.next().now_or_never().is_none(),
+            "junk must not end the subscription"
+        );
+        assert!(
+            poll.matches.next().now_or_never().is_none(),
+            "matches must stay open"
+        );
+        poll.close().await;
+    }
+
+    #[tokio::test]
+    async fn close_stops_a_waiting_request() {
+        let (server, served) = server_with_delay(&[NO_EVENTS], Duration::from_secs(30)).await;
+        let poll = tokenless(&server.uri());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while served.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            served.load(Ordering::SeqCst),
+            1,
+            "request should be waiting"
+        );
+        tokio::time::timeout(Duration::from_secs(2), poll.close())
+            .await
+            .expect("close() must not wait for the pending request");
+    }
+
+    #[tokio::test]
+    async fn connection_error_text_has_no_token_or_query() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let mut poll = authenticated(format!("http://{addr}")).await;
+        let err = next_within(&mut poll.errors).await.expect("an error");
+        assert!(matches!(err, AudDError::Connection { .. }), "got {err:?}");
+        let shown = format!("{err} | {err:?}");
+        assert!(!shown.contains(TOKEN), "{shown}");
+        assert!(!shown.contains(CATEGORY), "{shown}");
+    }
 }

@@ -31,12 +31,10 @@ impl<'a> CustomCatalog<'a> {
     ///
     /// # Retry policy
     ///
-    /// Custom-catalog uploads are metered — every attempt that reaches the
-    /// server is billed. To avoid double-charging on transient failures, this
-    /// method does **not** retry: a single attempt is made and any error
-    /// (transport, 5xx, etc.) surfaces immediately so you can decide how to
-    /// recover. This is stricter than the per-client `max_attempts` builder
-    /// setting, which is intentionally ignored here.
+    /// The upload is sent once and never retried automatically, whatever the
+    /// client's `max_attempts` setting: any error (transport, 5xx, etc.)
+    /// surfaces immediately. Check the error before sending it again (an
+    /// upload to an `audio_id` that already holds a song replaces it).
     ///
     /// # Errors
     ///
@@ -47,9 +45,8 @@ impl<'a> CustomCatalog<'a> {
         let reopen = prepare_source(source.into())?;
         let url = format!("{}/upload/", self.inner.api_base);
         let http = self.inner.http.clone();
-        // Custom-catalog upload is metered; a transient transport failure
-        // could double-charge if we retried. Force a single attempt,
-        // overriding the client's `max_attempts` setting.
+        // Sent once and never retried automatically, whatever the client's
+        // `max_attempts` setting.
         let policy = RetryPolicy::new(RetryClass::Mutating).with_max_attempts(1);
         let audio_id_s = audio_id.to_string();
 

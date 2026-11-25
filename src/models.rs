@@ -95,6 +95,25 @@ where
     Ok(lenient_from_value(v).unwrap_or_default())
 }
 
+/// Decode a list element by element: entries that don't decode are skipped,
+/// and a value that isn't a list yields an empty list.
+pub(crate) fn lenient_list<T: serde::de::DeserializeOwned>(v: Value) -> Vec<T> {
+    match v {
+        Value::Array(items) => items.into_iter().filter_map(lenient_from_value).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `deserialize_with` form of [`lenient_list`].
+fn lenient_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = Value::deserialize(deserializer)?;
+    Ok(lenient_list(v))
+}
+
 /// Decode `v` into `T`, coercing convertible mismatched scalars.
 pub(crate) fn lenient_from_value<T: serde::de::DeserializeOwned>(v: Value) -> Option<T> {
     match serde_json::from_value::<T>(v.clone()) {
@@ -952,7 +971,7 @@ impl EnterpriseMatch {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct EnterpriseChunkResult {
     /// Songs matched in this chunk.
-    #[serde(default, deserialize_with = "lenient_or_default")]
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub songs: Vec<EnterpriseMatch>,
     /// Offset of this chunk in the source (e.g., `"00:00"`). This is the
     /// chunk's position in the user's file — the anchor for each song's
@@ -1242,12 +1261,10 @@ impl<'de> Deserialize<'de> for StreamCallbackMatch {
             Some(Value::Null) | None => None,
             Some(v) => lenient_from_value(v),
         };
-        let results: Vec<StreamCallbackSong> = match map.remove("results") {
-            // A missing or non-array `results` deserializes to an empty Vec
-            // rather than erroring.
-            Some(v) => serde_json::from_value(v).unwrap_or_default(),
-            None => Vec::new(),
-        };
+        // A missing or non-array `results` yields an empty list, and entries
+        // that don't decode are skipped, rather than erroring.
+        let results: Vec<StreamCallbackSong> =
+            map.remove("results").map_or_else(Vec::new, lenient_list);
         let mut iter = results.into_iter();
         // Empty `results` is tolerated: `song` defaults to an empty
         // `StreamCallbackSong` (all fields optional) instead of erroring.

@@ -14,7 +14,7 @@ The API itself is so simple that it can easily be used even without an SDK: [doc
 
 ```toml
 [dependencies]
-audd = "1.4"
+audd = "1.5.16"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -147,8 +147,12 @@ let matches = audd.recognize_enterprise(
     "podcast.mp3",
     EnterpriseOptions { limit: Some(10), ..Default::default() },
 ).await?;
-for m in matches { println!("{}: {} — {}", m.timecode,
-    m.artist.as_deref().unwrap_or(""), m.title.as_deref().unwrap_or("")); }
+for m in matches {
+    println!("{}: {} — {}",
+        m.timecode.as_deref().unwrap_or(""),
+        m.artist.as_deref().unwrap_or(""),
+        m.title.as_deref().unwrap_or(""));
+}
 # Ok(()) }
 ```
 
@@ -178,7 +182,7 @@ let back: RecognitionResult = serde_json::from_slice(&bytes)?;  // typed again, 
 
 ## Errors
 
-Every fallible method returns `Result<T, AudDError>`. The error type is a single enum with five variants — `Api`, `Server`, `Connection`, `Serialization`, `Source`, `Configuration` — propagate with `?` and dispatch on category via the helper predicates rather than matching on numeric error codes:
+Every fallible method returns `Result<T, AudDError>`. The error type is a single enum with six variants — `Api`, `Server`, `Connection`, `Serialization`, `Source`, `Configuration` — propagate with `?` and dispatch on category via the helper predicates rather than matching on numeric error codes:
 
 ```rust,no_run
 use audd::AudD;
@@ -204,12 +208,14 @@ The full predicate set: `is_authentication`, `is_quota`, `is_subscription`, `is_
 
 ```rust,no_run
 use audd::AudD;
+use std::time::Duration;
 
 let client = reqwest::Client::builder()
     .proxy(reqwest::Proxy::all("http://corp-proxy:8080").unwrap())
+    .connect_timeout(Duration::from_secs(30))
     .build().unwrap();
 
-let audd = AudD::builder("your-token")
+let audd = AudD::builder("your-api-token")
     .max_attempts(3)        // retry budget per call (default 3; set to 1 to disable)
     .backoff_factor(0.5)    // initial backoff seconds, jittered (default 0.5)
     .reqwest_client(client) // shared by standard + enterprise endpoints
@@ -218,7 +224,7 @@ let audd = AudD::builder("your-token")
 # let _ = audd;
 ```
 
-Default timeouts: 30 s connect / 60 s read on standard endpoints, 30 s connect / 1 h read on the enterprise endpoint. Override per call with `EnterpriseOptions { timeout: Some(_), .. }`.
+Without an injected client, the timeouts are 30 s connect / 60 s read on standard endpoints and 30 s connect / 1 h read on the enterprise endpoint. An injected client keeps its own timeouts on both endpoints, so leave its overall `timeout` unset (or at least an hour) if you call `recognize_enterprise`. Override per call with `RecognizeOptions { timeout: Some(_), .. }` or `EnterpriseOptions { timeout: Some(_), .. }`.
 
 ## Choosing a TLS backend
 
@@ -234,7 +240,7 @@ Pick exactly one. To opt out of `rustls` and use OpenSSL:
 
 ```toml
 [dependencies]
-audd = { version = "1.4", default-features = false, features = ["native-tls"] }
+audd = { version = "1.5.16", default-features = false, features = ["native-tls"] }
 ```
 
 ## Streams
@@ -250,15 +256,19 @@ let streams = audd.streams();
 streams.set_callback_url(
     "https://your.app/audd/callback",
     Some(&["apple_music".into(), "spotify".into()]),
+    None, // extra_parameters
 ).await?;
 
-// 2. Add streams to monitor.
-streams.add("https://example.com/radio.m3u8", 1, None).await?;
-streams.add("twitch:somechannel", 2, None).await?;
+// 2. Add streams to monitor (callbacks: None, extra_parameters: None).
+streams.add("https://example.com/radio.m3u8", 1, None, None).await?;
+streams.add("twitch:somechannel", 2, None, None).await?;
 
 // 3. Inspect what you have configured.
 for s in streams.list().await? {
-    println!("{} -> {} (running={})", s.radio_id, s.url, s.stream_running);
+    println!("{} -> {} (running={})",
+        s.radio_id.unwrap_or_default(),
+        s.url.as_deref().unwrap_or(""),
+        s.stream_running);
 }
 # Ok(()) }
 ```
@@ -271,13 +281,17 @@ use audd::{handle_callback, CallbackEvent};
 # fn run(body: &[u8]) -> Result<(), audd::AudDError> {
 match handle_callback(body)? {
     CallbackEvent::Match(m) => {
-        println!("matched: {} — {}", m.song.artist, m.song.title);
+        println!("matched: {} — {}",
+            m.song.artist.as_deref().unwrap_or(""),
+            m.song.title.as_deref().unwrap_or(""));
         for alt in &m.alternatives {
-            println!("  alt: {} — {}", alt.artist, alt.title);
+            println!("  alt: {} — {}",
+                alt.artist.as_deref().unwrap_or(""),
+                alt.title.as_deref().unwrap_or(""));
         }
     }
     CallbackEvent::Notification(n) => {
-        println!("notification: {}", n.notification_message);
+        println!("notification: {}", n.notification_message.as_deref().unwrap_or(""));
     }
 }
 # Ok(()) }
@@ -289,7 +303,7 @@ See [`examples/streams_callback_handler`](./examples/streams_callback_handler.rs
 
 ### Receiving events without a callback URL (longpoll)
 
-If hosting a callback receiver isn't an option, longpoll for events from the client side. The poll handle exposes three typed `Stream`s — matches, notifications, errors — drive them with a `tokio::select!` loop. Server keepalive ticks are silently absorbed:
+If hosting a callback receiver isn't an option, longpoll for events from the client side. The poll handle exposes three typed `Stream`s — matches, notifications, errors — drive them with a `tokio::select!` loop. Keep the `errors` arm: if the subscription ends, it says why (for example a `timeout` outside 1 to 120 seconds, or a network failure that outlasted the retries).
 
 ```rust,no_run
 # use audd::{AudD, LongpollOptions};
@@ -303,8 +317,14 @@ loop {
     tokio::select! {
         biased;
         Some(err) = poll.errors.next() => { eprintln!("longpoll error: {err}"); break; }
-        Some(n)   = poll.notifications.next() => println!("notification: {}", n.notification_message),
-        Some(m)   = poll.matches.next() => println!("matched: {} — {}", m.song.artist, m.song.title),
+        Some(n)   = poll.notifications.next() => {
+            println!("notification: {}", n.notification_message.as_deref().unwrap_or(""));
+        }
+        Some(m)   = poll.matches.next() => {
+            println!("matched: {} — {}",
+                m.song.artist.as_deref().unwrap_or(""),
+                m.song.title.as_deref().unwrap_or(""));
+        }
         else => break,
     }
 }
@@ -321,10 +341,19 @@ use futures_util::StreamExt;
 # async fn run() -> Result<(), audd::AudDError> {
 let consumer = LongpollConsumer::new("abc123def");
 let mut poll = consumer.iterate(LongpollIterateOptions::default());
-while let Some(m) = poll.matches.next().await {
-    println!("matched: {} — {}", m.song.artist, m.song.title);
+loop {
+    tokio::select! {
+        biased;
+        Some(err) = poll.errors.next() => return Err(err),
+        Some(m)   = poll.matches.next() => {
+            println!("matched: {} — {}",
+                m.song.artist.as_deref().unwrap_or(""),
+                m.song.title.as_deref().unwrap_or(""));
+        }
+        else => return Ok(()),
+    }
 }
-# Ok(()) }
+# }
 ```
 
 `audd::derive_longpoll_category(token, radio_id)` is also available as a free function for computing categories on a server and shipping them to a frontend that runs `LongpollConsumer`.
@@ -342,6 +371,8 @@ while let Some(m) = poll.matches.next().await {
 audd.custom_catalog().add(42, "https://my.song.mp3").await?;
 # Ok(()) }
 ```
+
+`add` is sent once and never retried automatically: check the error before sending it again (an upload to an `audio_id` that already holds a song replaces it).
 
 ## License
 

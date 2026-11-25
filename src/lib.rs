@@ -4,7 +4,7 @@
 //! # async fn run() -> Result<(), audd::AudDError> {
 //! use audd::AudD;
 //!
-//! let audd = AudD::new("test");
+//! let audd = AudD::new("your-api-token");
 //! if let Some(result) = audd.recognize("https://audd.tech/example.mp3").await? {
 //!     println!("{} — {}", result.artist.as_deref().unwrap_or(""), result.title.as_deref().unwrap_or(""));
 //! }
@@ -58,7 +58,9 @@ mod user_agent;
 mod version;
 
 pub use advanced::Advanced;
-pub use client::{AudD, AudDBuilder, AudDEvent, EnterpriseOptions, EventKind, OnEventHook};
+pub use client::{
+    AudD, AudDBuilder, AudDEvent, EnterpriseOptions, EventKind, OnEventHook, RecognizeOptions,
+};
 pub use custom_catalog::CustomCatalog;
 pub use errors::{error_for_code, AudDError, ErrorKind};
 pub use helpers::{add_return_to_url, derive_longpoll_category, handle_callback, parse_callback};
@@ -73,3 +75,8 @@ pub use retry::{RetryClass, RetryPolicy};
 pub use source::Source;
 pub use streams::{LongpollOptions, LongpollPoll, Streams};
 pub use version::VERSION;
+
+// Compiles every Rust snippet in the README as a doctest.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod readme_doctests {}
